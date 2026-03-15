@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Build release
+        run: |
+          cargo build --release
+          cargo build --release -p aurea-shell
+      - name: Package
+        shell: pwsh
+        run: |
+          $dir = "aurea-windows-x64"
+          New-Item -Path $dir -ItemType Directory
+          Copy-Item target/release/aurea.exe $dir/
+          Copy-Item target/release/aurea-viewer.exe $dir/
+          Copy-Item target/release/aurea_shell.dll $dir/
+          Copy-Item scripts/install.ps1 $dir/
+          Copy-Item scripts/uninstall.ps1 $dir/
+          Compress-Archive -Path $dir -DestinationPath aurea-windows-x64.zip
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: aurea-windows-x64.zip
+          generate_release_notes: true
