@@ -1,0 +1,10 @@
+[package]
+name = "aurea-viewer"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Aurea image viewer"
+
+[dependencies]
+aurea-core = { path = "../core" }
+minifb = "0.27"

@@ -1,0 +1,15 @@
+[package]
+name = "aurea"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Aurea image codec CLI"
+
+[[bin]]
+name = "aurea"
+path = "src/main.rs"
+
+[dependencies]
+aurea-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }

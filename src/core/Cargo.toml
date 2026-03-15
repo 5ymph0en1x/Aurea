@@ -1,0 +1,15 @@
+[package]
+name = "aurea-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Aurea image codec core library"
+
+[dependencies]
+ndarray = "0.16"
+byteorder = "1"
+flate2 = "1"
+xz2 = "0.1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+rayon = "1"
+rustfft = "6"
