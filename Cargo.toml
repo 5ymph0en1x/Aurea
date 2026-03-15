@@ -1,3 +1,4 @@
 [workspace]
 members = ["src/core", "src/cli", "src/viewer", "src/shell"]
+default-members = ["src/core", "src/cli", "src/viewer"]
 resolver = "2"
