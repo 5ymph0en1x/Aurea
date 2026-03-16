@@ -10,6 +10,15 @@ Written in Rust. Ships as a CLI encoder/decoder, a native GUI viewer, and a Wind
 
 ---
 
+<p align="center">
+  <img src="samples/alchemist_JPEG-q85.jpg" width="45%" />
+  <img src="samples/alchemist_AUREA-q85.png" width="45%" />
+</p>
+
+<p align="center">
+  <img width="1024" src="samples/rate_distortion.png">
+</p>
+
 ## How It Works
 
 ### Encode
