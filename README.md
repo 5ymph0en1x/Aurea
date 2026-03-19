@@ -103,22 +103,6 @@ Three decoder-side enhancements improve quality at zero bitrate cost:
 
 ---
 
-## Rate-Distortion Performance
-
-Benchmarked on 12 HD images (2560x1120 to 2560x1440):
-
-| Quality | AUREA PSNR | AUREA bpp | JPEG PSNR | JPEG bpp | Delta |
-|---------|-----------|-----------|-----------|----------|-------|
-| q=50 | 35.20 dB | 0.691 | 34.80 dB | 0.547 | **+0.40 dB** |
-| q=65 | 36.44 dB | 0.897 | 35.84 dB | 0.674 | **+0.60 dB** |
-| q=75 | 37.57 dB | 1.134 | 36.86 dB | 0.813 | **+0.71 dB** |
-| q=85 | 39.18 dB | 1.576 | 38.41 dB | 1.104 | -0.35 dB (match) |
-| q=95 | **41.87 dB** | 2.718 | 41.14 dB | 2.161 | **+0.73 dB** |
-
-At equivalent PSNR, Aurea produces files ~20% larger than JPEG at low quality but converges at q=85 and **surpasses JPEG at high quality**. Visually, Aurea avoids JPEG's characteristic 8x8 blocking artifacts, producing smoother gradients and more natural texture at all quality levels.
-
----
-
 ## Installation
 
 ### Download
