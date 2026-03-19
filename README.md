@@ -4,9 +4,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
 
-Aurea is a lossy image codec that weaves the golden ratio into every stage of compression -- from color decorrelation to quantization to entropy coding. It produces `.aur` files that approach JPEG quality while encoding structural information that block-based codecs discard.
+Aurea is a lossy image codec that weaves the golden ratio into every stage of compression -- from its Golden Color Transform to DNA-inspired codon quantization to Fibonacci-weighted prediction. It produces .aur files that preserve perceptual naturalness where block-based codecs fail.
 
-At high quality settings (q >= 85), **Aurea matches or exceeds JPEG** in both PSNR and SSIM on natural images. At q=95, Aurea averages **+0.73 dB over JPEG** at comparable bitrate.
+Measured across 12 HD images with neural perceptual metrics (LPIPS, DISTS, FSIM, NIQE), Aurea produces images rated 25% more natural than JPEG at low bitrate (NIQE 4.37 vs 5.79 at q=20), while maintaining near-perfect structural fidelity (FSIM > 0.997 at all quality levels). At high quality (q >= 85), both codecs converge toward transparency -- but at low-to-medium quality where compression artifacts matter most, Aurea's artifacts are smooth and invisible where JPEG's 8x8 blocking is not.
 
 Written in Rust. Ships as a CLI encoder/decoder, a native GUI viewer, and a Windows shell extension with Explorer thumbnails and WIC integration.
 
@@ -17,6 +17,9 @@ Written in Rust. Ships as a CLI encoder/decoder, a native GUI viewer, and a Wind
   <img src="samples/alchemist_AUREA-q20.png" width="45%" />
 </p>
 
+<p align="center">
+  <img src="samples/perceptual_metrics.png" />
+</p>
 
 ## How It Works
 
