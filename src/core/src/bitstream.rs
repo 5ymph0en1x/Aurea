@@ -368,8 +368,12 @@ pub struct X267V6Stream {
     pub pred_coeffs: Option<Vec<[f32; 2]>>,
     /// AUREA v6/v7: geometric encoding.
     pub geometric: bool,
-    /// AUREA v7: residual bands use rANS per-stream.
+    /// AUREA v7+: residual bands use rANS per-stream.
     pub rans_bands: bool,
+    /// AUREA v8: chroma residual for saturated zones (anti color-bleed).
+    pub chroma_residual: bool,
+    /// AUREA v9: Weber-Fechner adaptive dequant + phi_chroma_factor fix.
+    pub v9: bool,
 }
 
 /// Parse a v6 x267 stream.
@@ -522,6 +526,8 @@ pub fn parse_x267_v6_full(stream: &[u8]) -> io::Result<X267V6Stream> {
         pred_coeffs: None,
         geometric: false,
         rans_bands: false,
+        chroma_residual: false,
+        v9: false,
     })
 }
 
@@ -605,4 +611,111 @@ pub fn write_x267_v6_stream(
     s.extend_from_slice(det_stream);
 
     s
+}
+
+// ======================================================================
+// AUR2 format (v10 primitives-first)
+// ======================================================================
+
+/// AUR2 magic bytes.
+pub const AUR2_MAGIC: &[u8; 4] = b"AUR2";
+
+/// AUR2 file header (v10 primitives-first pipeline).
+#[derive(Debug, Clone)]
+pub struct Aur2Header {
+    pub version: u8,       // 0 for now, reserved for future iterations
+    pub quality: u8,
+    pub width: usize,
+    pub height: usize,
+    pub wv_levels: usize,
+    pub detail_step: f64,
+    pub ll_ranges: [(f32, f32); 3],  // L, C1, C2 (min, max)
+}
+
+/// Serialize an AUR2 header to bytes (39 bytes total).
+pub fn write_aur2_header(header: &Aur2Header) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(39);
+    buf.extend_from_slice(AUR2_MAGIC);
+    buf.push(header.version);
+    buf.push(header.quality);
+    buf.write_u16::<LittleEndian>(header.width as u16).unwrap();
+    buf.write_u16::<LittleEndian>(header.height as u16).unwrap();
+    buf.push(header.wv_levels as u8);
+    buf.write_f32::<LittleEndian>(header.detail_step as f32).unwrap();
+    for &(min, max) in &header.ll_ranges {
+        buf.write_f32::<LittleEndian>(min).unwrap();
+        buf.write_f32::<LittleEndian>(max).unwrap();
+    }
+    buf
+}
+
+/// Parse an AUR2 header from bytes. Returns (header, bytes_consumed).
+pub fn parse_aur2_header(data: &[u8]) -> io::Result<(Aur2Header, usize)> {
+    if data.len() < 39 || &data[0..4] != AUR2_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Not an AUR2 file (invalid magic or too short)",
+        ));
+    }
+    let mut c = Cursor::new(&data[4..]);
+    let version = c.read_u8()?;
+    let quality = c.read_u8()?;
+    let width = c.read_u16::<LittleEndian>()? as usize;
+    let height = c.read_u16::<LittleEndian>()? as usize;
+    let wv_levels = c.read_u8()? as usize;
+    let detail_step = c.read_f32::<LittleEndian>()? as f64;
+    let mut ll_ranges = [(0.0f32, 0.0f32); 3];
+    for r in &mut ll_ranges {
+        r.0 = c.read_f32::<LittleEndian>()?;
+        r.1 = c.read_f32::<LittleEndian>()?;
+    }
+    Ok((Aur2Header {
+        version, quality, width, height, wv_levels, detail_step, ll_ranges,
+    }, 39))
+}
+
+#[cfg(test)]
+mod aur2_tests {
+    use super::*;
+
+    #[test]
+    fn test_aur2_header_roundtrip() {
+        let header = Aur2Header {
+            version: 0,
+            quality: 75,
+            width: 2560,
+            height: 1120,
+            wv_levels: 4,
+            detail_step: 7.5,
+            ll_ranges: [(-20.0, 340.0), (-100.0, 50.0), (-80.0, 120.0)],
+        };
+        let bytes = write_aur2_header(&header);
+        assert_eq!(bytes.len(), 39);
+        assert_eq!(&bytes[0..4], b"AUR2");
+
+        let (parsed, consumed) = parse_aur2_header(&bytes).unwrap();
+        assert_eq!(consumed, 39);
+        assert_eq!(parsed.width, 2560);
+        assert_eq!(parsed.height, 1120);
+        assert_eq!(parsed.wv_levels, 4);
+        assert_eq!(parsed.quality, 75);
+        assert_eq!(parsed.version, 0);
+        // detail_step has f32 roundtrip precision loss
+        assert!((parsed.detail_step - 7.5).abs() < 0.01);
+        assert_eq!(parsed.ll_ranges[0], (-20.0, 340.0));
+        assert_eq!(parsed.ll_ranges[1], (-100.0, 50.0));
+        assert_eq!(parsed.ll_ranges[2], (-80.0, 120.0));
+    }
+
+    #[test]
+    fn test_aur2_header_reject_bad_magic() {
+        let data = vec![0u8; 39];  // all zeros, not AUR2
+        assert!(parse_aur2_header(&data).is_err());
+    }
+
+    #[test]
+    fn test_aur2_header_reject_short() {
+        let data = b"AUR2".to_vec();  // only 4 bytes, need 39
+        assert!(parse_aur2_header(&data).is_err());
+    }
 }

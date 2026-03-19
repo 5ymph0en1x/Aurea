@@ -2,7 +2,6 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
-use aurea_core::aurea::AUREA_MAGIC;
 use aurea_core::aurea_encoder::{self, AureaEncoderParams};
 
 // v2 only (v1 removed)
@@ -32,9 +31,6 @@ enum Commands {
         /// Quality (1-100, default 75)
         #[arg(short, long, default_value_t = 75)]
         quality: u8,
-        /// Geometric coding (AUREA v6)
-        #[arg(short = 'g', long)]
-        geometric: bool,
     },
     /// Display information about a .aur file
     Info {
@@ -69,55 +65,43 @@ fn cmd_info(input: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let file_data = fs::read(input)?;
     let file_size = file_data.len();
 
-    if file_data.len() < 4 || &file_data[0..4] != AUREA_MAGIC {
-        return Err("Not a .aur file (invalid magic)".into());
+    if file_data.len() < 4 {
+        return Err("File too short".into());
     }
 
-    let after_magic = &file_data[4..];
-    let payload = if after_magic.len() >= 2 && after_magic[0] == 0xFD && after_magic[1] == 0x37 {
-        aurea_core::bitstream::decompress_xts_payload(after_magic)?
-    } else if !after_magic.is_empty() && after_magic[0] >= 1 && after_magic[0] <= 7 {
-        after_magic.to_vec()
+    if &file_data[0..4] == b"AUR2" {
+        // AUR2 v10 format
+        let (header, _) = aurea_core::bitstream::parse_aur2_header(&file_data)
+            .map_err(|e| format!("Parse error: {}", e))?;
+        let n = header.width * header.height;
+        let bpp = file_size as f64 * 8.0 / n as f64;
+        let ratio = (n * 3) as f64 / file_size as f64;
+
+        println!("File      : {}", input.display());
+        if header.version >= 2 {
+            println!("Format    : AUREA v2-LOT (.aur) [AUR2]");
+        } else {
+            println!("Format    : AUREA v10 (.aur) [AUR2]");
+        }
+        println!("Size      : {} bytes ({:.2} bpp)", file_size, bpp);
+        println!("Image     : {}x{} ({} pixels)", header.width, header.height, n);
+        println!("Quality   : {}", header.quality);
+        if header.version >= 2 {
+            println!("Transform : LOT (Lapped Orthogonal Transform, 16x16 blocks)");
+        } else {
+            println!("Wavelets  : {} levels", header.wv_levels);
+            println!("Pipeline  : Primitives-First (phi superstrings + polynomial patches)");
+        }
+        println!("Coding    : rANS");
+        println!("Color     : Golden Color Transform (GCT)");
+        println!("Ratio     : {:.1}x vs RAW", ratio);
     } else {
-        aurea_core::rans::rans_decompress_bytes(after_magic)
-    };
-
-    if payload.len() < 7 {
-        return Err("Payload too short".into());
+        // Unknown/legacy format
+        println!("File      : {}", input.display());
+        println!("Format    : Unknown (not AUR2)");
+        println!("Size      : {} bytes", file_size);
+        return Err("Unsupported format. Only AUR2 (v10) is supported.".into());
     }
-
-    let version = payload[0];
-    let quality = payload[1];
-    let w = u16::from_le_bytes([payload[2], payload[3]]) as usize;
-    let h = u16::from_le_bytes([payload[4], payload[5]]) as usize;
-    let wv_levels = payload[6];
-
-    let n = w * h;
-    let bpp = file_size as f64 * 8.0 / n as f64;
-    let ratio = (n * 3) as f64 / file_size as f64;
-
-    println!("File      : {}", input.display());
-    println!("Format    : AUREA v{} (.aur)", version);
-    println!("Size      : {} bytes ({:.2} bpp)", file_size, bpp);
-    println!("Image     : {}x{} ({} pixels)", w, h, n);
-    println!("Quality   : {}", quality);
-    println!("Wavelets  : {} levels", wv_levels);
-    println!("Quant.    : Fibonacci (phi)");
-    println!("Scan      : Golden spiral (phi)");
-    println!("Coding    : Zeckendorf");
-    if version >= 2 {
-        println!("Mode      : Golden Color Transform (GCT, phi-based)");
-    } else {
-        println!("Mode      : YCbCr 4:2:0");
-    }
-    let is_lzma = after_magic.len() >= 2 && after_magic[0] == 0xFD && after_magic[1] == 0x37;
-    let comp_name = if is_lzma { "LZMA (legacy)" } else { "rANS" };
-    if version == 6 {
-        println!("Coding    : Geometric (segments + arcs) + {}", comp_name);
-    } else {
-        println!("Compression: {}", comp_name);
-    }
-    println!("Ratio     : {:.1}x vs RAW", ratio);
 
     Ok(())
 }
@@ -126,7 +110,6 @@ fn cmd_encode(
     input: &PathBuf,
     output: &PathBuf,
     quality: u8,
-    geometric: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t0 = Instant::now();
 
@@ -136,14 +119,13 @@ fn cmd_encode(
 
     let n_repr = aurea_encoder::quality_to_n_repr(quality);
 
-    let ver = if geometric { "v6 (geometric)" } else { "v2" };
-    println!("Encode AUREA {} : {} (q={}, n_repr={})", ver, input.display(), quality, n_repr);
+    println!("Encode AUREA v10 : {} (q={}, n_repr={})", input.display(), quality, n_repr);
     println!("  Image     : {}x{}", width, height);
 
     let params = AureaEncoderParams {
         quality,
         n_representatives: n_repr,
-        geometric,
+        geometric: true,
     };
 
     let result = aurea_encoder::encode_aurea_v2(&rgb, width, height, &params)?;
@@ -167,9 +149,9 @@ fn main() {
 
     let result = match &cli.command {
         Commands::Decode { input, output } => cmd_decode(input, output),
-        Commands::Encode { input, output, quality, geometric } => {
+        Commands::Encode { input, output, quality } => {
             let out = output.clone().unwrap_or_else(|| input.with_extension("aur"));
-            cmd_encode(input, &out, *quality, *geometric)
+            cmd_encode(input, &out, *quality)
         }
         Commands::Info { input } => cmd_info(input),
     };

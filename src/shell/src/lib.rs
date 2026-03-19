@@ -32,6 +32,8 @@ const CLSID_WIC_IMAGING_FACTORY: GUID =
 
 // Magic bytes AURA: 0x41 0x55 0x52 0x41
 const AUREA_MAGIC: &[u8; 4] = b"AURA";
+// Magic bytes AUR2: 0x41 0x55 0x52 0x32
+const AUR2_MAGIC: &[u8; 4] = b"AUR2";
 
 // Raw vtable layout of IUnknown to call QueryInterface via COM.
 #[repr(C)]
@@ -256,7 +258,7 @@ impl IWICBitmapDecoder_Impl for AureaWicDecoder_Impl {
             // Rewind the stream
             let _ = stream.Seek(0, STREAM_SEEK_SET, None);
         }
-        if read < 4 || &magic != AUREA_MAGIC {
+        if read < 4 || (&magic != AUREA_MAGIC && &magic != AUR2_MAGIC) {
             return Ok(0);
         }
         // WICBitmapDecoderCapabilityCanDecodeAllImages

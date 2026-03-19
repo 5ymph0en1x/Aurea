@@ -1,19 +1,19 @@
 pub mod aurea;
 pub mod aurea_encoder;
 pub mod bitstream;
+pub mod calibration;
 pub mod color;
 pub mod dsp;
-pub mod encoder;
-pub mod fibonacci;
 pub mod geometric;
 pub mod golden;
-pub mod paeth;
 pub mod rans;
-pub mod vq;
 pub mod wavelet;
-pub mod zeckendorf;
+pub mod lot;
+pub mod scene_analysis;
+pub mod polymerase;
+pub mod spin;
+pub mod scan;
 
-use bitstream::X267V6Stream;
 use ndarray::Array2;
 
 /// Decoded RGB image.
@@ -23,427 +23,885 @@ pub struct DecodedImage {
     pub height: usize,
 }
 
-/// Decode a complete AUREA file (raw bytes) and return the RGB image.
-/// Supports both legacy LZMA format and new rANS format.
 pub fn decode_aurea(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std::error::Error>> {
-    if file_data.len() < 4 || &file_data[0..4] != aurea::AUREA_MAGIC {
-        return Err("Not an AUREA file".into());
+    if file_data.len() >= 4 && &file_data[0..4] == bitstream::AUR2_MAGIC {
+        return decode_aur2(file_data);
     }
-    let after_magic = &file_data[4..];
+    Err("Unsupported format: expected AUR2 magic".into())
+}
 
-    // Detect payload format by inspecting the first bytes:
-    // - LZMA: starts with 0xFD 0x37 (legacy v2-v6 with LZMA wrapper)
-    // - Raw v2-v7: first byte is a valid version number (1-7)
-    // - rANS byte-level: anything else (v6 with rANS wrapper)
-    let payload = if after_magic.len() >= 2 && after_magic[0] == 0xFD && after_magic[1] == 0x37 {
-        // Legacy LZMA format
-        bitstream::decompress_xts_payload(after_magic)?
-    } else if !after_magic.is_empty() && after_magic[0] >= 1 && after_magic[0] <= 7 {
-        // Raw payload: version byte directly present (v2+ with per-stream rANS)
-        after_magic.to_vec()
-    } else {
-        // Try rANS byte-level decompression
-        rans::rans_decompress_bytes(after_magic)
+fn decode_aur2(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std::error::Error>> {
+    let (header, _header_size) = bitstream::parse_aur2_header(file_data)?;
+
+    // Route based on version
+    if header.version >= 3 {
+        return decode_aur2_v3(file_data);
+    }
+    if header.version >= 2 {
+        return decode_aur2_lot(file_data);
+    }
+
+    decode_aur2_v1(file_data)
+}
+
+/// v1 decoder: CDF 9/7 wavelet + geometric primitives.
+fn decode_aur2_v1(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std::error::Error>> {
+    let (header, header_size) = bitstream::parse_aur2_header(file_data)?;
+    let width = header.width;
+    let height = header.height;
+    let wv_levels = header.wv_levels;
+    let detail_step = header.detail_step;
+    let ll_ranges = header.ll_ranges;
+
+    let body = &file_data[header_size..];
+    let mut pos = 0usize;
+
+    let read_u16 = |data: &[u8], p: &mut usize| -> u16 {
+        let v = u16::from_le_bytes([data[*p], data[*p + 1]]);
+        *p += 2; v
+    };
+    let read_u32 = |data: &[u8], p: &mut usize| -> u32 {
+        let v = u32::from_le_bytes([data[*p], data[*p + 1], data[*p + 2], data[*p + 3]]);
+        *p += 4; v
+    };
+    let read_f32 = |data: &[u8], p: &mut usize| -> f32 {
+        let v = f32::from_le_bytes([data[*p], data[*p + 1], data[*p + 2], data[*p + 3]]);
+        *p += 4; v
     };
 
-    let v6 = aurea::parse_aurea_payload(&payload)?;
-    decode_v6_from_parsed(&v6)
-}
+    let c1_h = read_u16(body, &mut pos) as usize;
+    let c1_w = read_u16(body, &mut pos) as usize;
+    let c2_h = read_u16(body, &mut pos) as usize;
+    let c2_w = read_u16(body, &mut pos) as usize;
 
-/// Reconstruct an image from a parsed AUREA v6 stream.
-/// CDF 9/7 wavelets + VQ/fibonacci on LL.
-/// Supports flags: zigzag, adaptive quant, inter-scale prediction.
-fn decode_v6_from_parsed(v6: &X267V6Stream) -> Result<DecodedImage, Box<dyn std::error::Error>> {
-    let hdr = &v6.header;
-    let height = hdr.h;
-    let width = hdr.w;
-    let (ll_yh, ll_yw) = hdr.ll_y_size;
-    let (ll_ch, ll_cw) = hdr.ll_c_size;
-    let (ll_crh, ll_crw) = hdr.ll_cr_size;
-    let flags = hdr.flags;
-    let use_interscale = flags & wavelet::FLAG_INTERSCALE != 0;
-
-    // --- 1. Reconstruct LL from labels (VQ + fibonacci + denormalize) ---
-    let labels_y = paeth::paeth_unpredict_2d(&v6.pred_y, ll_yh, ll_yw);
-    let labels_cb = paeth::paeth_unpredict_2d(&v6.pred_cb, ll_ch, ll_cw);
-    let labels_cr = paeth::paeth_unpredict_2d(&v6.pred_cr, ll_crh, ll_crw);
-
-    // VQ lookup
-    let mut y_ll_flat = vec![0.0f64; ll_yh * ll_yw];
-    for i in 0..y_ll_flat.len() {
-        let k = (labels_y[i] as usize).min(v6.centroids_y.len() - 1);
-        y_ll_flat[i] = v6.centroids_y[k];
-    }
-    let mut cb_ll_flat = vec![0.0f64; ll_ch * ll_cw];
-    for i in 0..cb_ll_flat.len() {
-        let k = (labels_cb[i] as usize).min(v6.centroids_cb.len() - 1);
-        cb_ll_flat[i] = v6.centroids_cb[k];
-    }
-    let mut cr_ll_flat = vec![0.0f64; ll_crh * ll_crw];
-    for i in 0..cr_ll_flat.len() {
-        let k = (labels_cr[i] as usize).min(v6.centroids_cr.len() - 1);
-        cr_ll_flat[i] = v6.centroids_cr[k];
+    let mut l_sizes = Vec::with_capacity(wv_levels);
+    let mut c1_sizes = Vec::with_capacity(wv_levels);
+    let mut c2_sizes = Vec::with_capacity(wv_levels);
+    for _ in 0..wv_levels {
+        l_sizes.push((read_u16(body, &mut pos) as usize, read_u16(body, &mut pos) as usize));
+        c1_sizes.push((read_u16(body, &mut pos) as usize, read_u16(body, &mut pos) as usize));
+        c2_sizes.push((read_u16(body, &mut pos) as usize, read_u16(body, &mut pos) as usize));
     }
 
-    // Fibonacci correction (parallel)
-    let (y_ll_fib, (cb_ll_fib, cr_ll_fib)) = rayon::join(
-        || fibonacci::fibonacci_correction(&y_ll_flat, &labels_y, &v6.centroids_y, ll_yh, ll_yw),
-        || rayon::join(
-            || fibonacci::fibonacci_correction(&cb_ll_flat, &labels_cb, &v6.centroids_cb, ll_ch, ll_cw),
-            || fibonacci::fibonacci_correction(&cr_ll_flat, &labels_cr, &v6.centroids_cr, ll_crh, ll_crw),
-        ),
-    );
+    let l_ll_h = read_u16(body, &mut pos) as usize;
+    let l_ll_w = read_u16(body, &mut pos) as usize;
+    let c1_ll_h = read_u16(body, &mut pos) as usize;
+    let c1_ll_w = read_u16(body, &mut pos) as usize;
+    let c2_ll_h = read_u16(body, &mut pos) as usize;
+    let c2_ll_w = read_u16(body, &mut pos) as usize;
 
-    // Denormalize LL
-    let y_ll = denormalize_ll(&y_ll_fib, hdr.ll_ranges[0].0, hdr.ll_ranges[0].1);
-    let cb_ll = denormalize_ll(&cb_ll_fib, hdr.ll_ranges[1].0, hdr.ll_ranges[1].1);
-    let cr_ll = denormalize_ll(&cr_ll_fib, hdr.ll_ranges[2].0, hdr.ll_ranges[2].1);
-
-    let y_ll_arr = Array2::from_shape_vec((ll_yh, ll_yw), y_ll)?;
-    let cb_ll_arr = Array2::from_shape_vec((ll_ch, ll_cw), cb_ll)?;
-    let cr_ll_arr = Array2::from_shape_vec((ll_crh, ll_crw), cr_ll)?;
-
-    // --- 2. Decode detail bands ---
-    let det = &v6.detail_data;
-    let mut p = 0usize;
-
-    // Pre-allocate slots (filled in reading order)
-    let mut y_subs_opt: Vec<Option<(Array2<f64>, Array2<f64>, Array2<f64>)>> =
-        (0..hdr.wv_levels).map(|_| None).collect();
-    let mut cb_subs_opt: Vec<Option<(Array2<f64>, Array2<f64>, Array2<f64>)>> =
-        (0..hdr.wv_levels).map(|_| None).collect();
-    let mut cr_subs_opt: Vec<Option<(Array2<f64>, Array2<f64>, Array2<f64>)>> =
-        (0..hdr.wv_levels).map(|_| None).collect();
-
-    // Determine reading order: if interscale, deepest-first; otherwise, shallowest-first
-    let level_order: Vec<usize> = if use_interscale || v6.band_size_prefixed {
-        (0..hdr.wv_levels).rev().collect()
-    } else {
-        (0..hdr.wv_levels).collect()
-    };
-
-    if v6.geometric {
-        // --- Geometric decode path (AUREA v6) ---
-        // Order: level (deepest first) -> channel (L, C1, C2) -> primitives + 3 residual bands
-        for &lv in &level_order {
-            let (y_h, y_w) = hdr.y_sizes[lv];
-            let (c_h, c_w) = hdr.cb_sizes[lv];
-            let (cr_h, cr_w) = hdr.cr_sizes[lv];
-            let y_bsizes = wavelet::detail_band_sizes(y_h, y_w);
-            let c_bsizes = wavelet::detail_band_sizes(c_h, c_w);
-            let cr_bsizes = wavelet::detail_band_sizes(cr_h, cr_w);
-
-            let all_bsizes = [y_bsizes, c_bsizes, cr_bsizes];
-            let all_steps = [hdr.steps_y[lv], hdr.steps_c[lv], hdr.steps_cr[lv]];
-            let mut all_bands_out: [Vec<Array2<f64>>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-
-            for ch_idx in 0..3 {
-                let bsizes = all_bsizes[ch_idx];
-                let steps = all_steps[ch_idx];
-
-                // 1. Read serialized primitives
-                let (prims, prim_bytes) = geometric::deserialize_primitives(&det[p..]);
-                p += prim_bytes;
-
-                // 2. Project primitives into the 3 prediction bands
-                let (h_lh, w_lh) = bsizes[0];
-                let (h_hl, w_hl) = bsizes[1];
-                let (h_hh, w_hh) = bsizes[2];
-                let (pred_lh, pred_hl, pred_hh) = geometric::render_primitives(
-                    &prims, h_lh, w_lh, h_hl, w_hl, h_hh, w_hh,
-                );
-
-                // 3. Read 3 residual bands (LH, HL, HH)
-                let preds = [&pred_lh, &pred_hl, &pred_hh];
-                for bi in 0..3 {
-                    let (bh, bw) = bsizes[bi];
-                    let step = steps[bi];
-                    let n_coeffs = bh * bw;
-                    let band_size = u32::from_le_bytes([
-                        det[p], det[p + 1], det[p + 2], det[p + 3],
-                    ]) as usize;
-                    let data_start = p + 4;
-
-                    let res_band = if v6.rans_bands {
-                        // v7: rANS-band encoded residuals (quantized i16 in Morton order)
-                        let (morton_coeffs, _) = rans::rans_decode_band(
-                            &det[data_start..data_start + band_size], n_coeffs,
-                        );
-                        // Morton inverse -> raster order, then dequantize
-                        let inv = wavelet::morton_order(bh, bw);
-                        let mut flat = vec![0.0f64; n_coeffs];
-                        for (morton_pos, &raster_pos) in inv.iter().enumerate() {
-                            if morton_pos < morton_coeffs.len() {
-                                flat[raster_pos] = morton_coeffs[morton_pos] as f64 * step;
-                            }
-                        }
-                        // Apply spectral spin
-                        wavelet::spectral_spin(&mut flat, bh, bw, step);
-                        Array2::from_shape_vec((bh, bw), flat).unwrap()
-                    } else {
-                        // v6: sigmap v2 format
-                        let (band, _) = wavelet::decode_detail_band_v2(
-                            det, data_start, bh, bw, step, flags,
-                        );
-                        band
-                    };
-                    p = data_start + band_size;
-
-                    // 4. Final band = residual (dequantized) + prediction * step
-                    let pred = preds[bi];
-                    let mut final_band = res_band;
-                    let rh = bh.min(pred.nrows());
-                    let rw = bw.min(pred.ncols());
-                    for i in 0..rh {
-                        for j in 0..rw {
-                            final_band[[i, j]] += pred[[i, j]] * step;
-                        }
-                    }
-                    all_bands_out[ch_idx].push(final_band);
-                }
-            }
-
-            // Assign Y, Cb, Cr
-            y_subs_opt[lv] = Some((
-                all_bands_out[0].remove(0),
-                all_bands_out[0].remove(0),
-                all_bands_out[0].remove(0),
-            ));
-            cb_subs_opt[lv] = Some((
-                all_bands_out[1].remove(0),
-                all_bands_out[1].remove(0),
-                all_bands_out[1].remove(0),
-            ));
-            cr_subs_opt[lv] = Some((
-                all_bands_out[2].remove(0),
-                all_bands_out[2].remove(0),
-                all_bands_out[2].remove(0),
-            ));
+    let mut steps_l = Vec::with_capacity(wv_levels);
+    let mut steps_c1 = Vec::with_capacity(wv_levels);
+    let mut steps_c2 = Vec::with_capacity(wv_levels);
+    for _ in 0..wv_levels {
+        let mut sl = [0.0f64; 3]; let mut sc1 = [0.0f64; 3]; let mut sc2 = [0.0f64; 3];
+        for bi in 0..3 {
+            sl[bi] = read_f32(body, &mut pos) as f64;
+            sc1[bi] = read_f32(body, &mut pos) as f64;
+            sc2[bi] = read_f32(body, &mut pos) as f64;
         }
-    } else {
-        // --- Legacy decode path (AUREA v2) ---
-        for &lv in &level_order {
-            let (y_h, y_w) = hdr.y_sizes[lv];
-            let (c_h, c_w) = hdr.cb_sizes[lv];
-            let (cr_h, cr_w) = hdr.cr_sizes[lv];
-            let y_bsizes = wavelet::detail_band_sizes(y_h, y_w);
-            let c_bsizes = wavelet::detail_band_sizes(c_h, c_w);
-            let cr_bsizes = wavelet::detail_band_sizes(cr_h, cr_w);
+        steps_l.push(sl); steps_c1.push(sc1); steps_c2.push(sc2);
+    }
+    let ll_step = read_f32(body, &mut pos) as f64;
 
-            let mut y_bands = Vec::with_capacity(3);
-            let mut cb_bands = Vec::with_capacity(3);
-            let mut cr_bands = Vec::with_capacity(3);
+    // ================================================================
+    // Decode LL subbands FIRST (Ribosome: LL serves as DNA template)
+    // ================================================================
+    struct LLMeta { ll_h: usize, ll_w: usize, ll_min: f32, ll_max: f32 }
+    let ll_metas = [
+        LLMeta { ll_h: l_ll_h, ll_w: l_ll_w, ll_min: ll_ranges[0].0, ll_max: ll_ranges[0].1 },
+        LLMeta { ll_h: c1_ll_h, ll_w: c1_ll_w, ll_min: ll_ranges[1].0, ll_max: ll_ranges[1].1 },
+        LLMeta { ll_h: c2_ll_h, ll_w: c2_ll_w, ll_min: ll_ranges[2].0, ll_max: ll_ranges[2].1 },
+    ];
+    let mut ll_arrays: Vec<Array2<f64>> = Vec::with_capacity(3);
 
-            for bi in 0..3 {
-                let (bh_y, bw_y) = y_bsizes[bi];
-                let (bh_c, bw_c) = c_bsizes[bi];
-                let (bh_cr, bw_cr) = cr_bsizes[bi];
+    for llm in ll_metas.iter() {
+        let h = llm.ll_h; let w = llm.ll_w;
 
-                let (band_y, new_p) = decode_one_band(v6, det, p, bh_y, bw_y, hdr.steps_y[lv][bi], flags);
-                p = new_p;
-                let (band_cb, new_p) = decode_one_band(v6, det, p, bh_c, bw_c, hdr.steps_c[lv][bi], flags);
-                p = new_p;
-                let (band_cr, new_p) = decode_one_band(v6, det, p, bh_cr, bw_cr, hdr.steps_cr[lv][bi], flags);
-                p = new_p;
+        let patch_data_size = read_u32(body, &mut pos) as usize;
+        let (patches, _) = geometric::deserialize_poly_patches(&body[pos..pos + patch_data_size]); pos += patch_data_size;
+        let prediction = geometric::render_ll_patches(&patches, h, w);
 
-                let band_y = if use_interscale && lv + 1 < hdr.wv_levels {
-                    if let Some(ref deeper) = y_subs_opt[lv + 1] {
-                        let deeper_b = band_ref(deeper, bi);
-                        let pred = wavelet::upsample_band(deeper_b, bh_y, bw_y);
-                        band_y + &pred
-                    } else { band_y }
-                } else { band_y };
+        let rans_size = read_u32(body, &mut pos) as usize;
+        let band_h = read_u16(body, &mut pos) as usize;
+        let band_w = read_u16(body, &mut pos) as usize;
+        let rans_data = &body[pos..pos + rans_size]; pos += rans_size;
 
-                let band_cb = if use_interscale && lv + 1 < hdr.wv_levels {
-                    if let Some(ref deeper) = cb_subs_opt[lv + 1] {
-                        let deeper_b = band_ref(deeper, bi);
-                        let pred = wavelet::upsample_band(deeper_b, bh_c, bw_c);
-                        band_cb + &pred
-                    } else { band_cb }
-                } else { band_cb };
+        let n_coeffs = band_h * band_w;
+        let (ordered_coeffs, _) = rans::rans_decode_band(rans_data, n_coeffs);
 
-                let band_cr = if use_interscale && lv + 1 < hdr.wv_levels {
-                    if let Some(ref deeper) = cr_subs_opt[lv + 1] {
-                        let deeper_b = band_ref(deeper, bi);
-                        let pred = wavelet::upsample_band(deeper_b, bh_cr, bw_cr);
-                        band_cr + &pred
-                    } else { band_cr }
-                } else { band_cr };
+        let flat = if band_h > 0 && band_w > 0 {
+            let order = wavelet::morton_order(band_h, band_w);
+            let mut raster = vec![0i16; n_coeffs];
+            for (m, &r) in order.iter().enumerate() { raster[r] = ordered_coeffs[m]; }
+            raster
+        } else { ordered_coeffs };
 
-                y_bands.push(band_y);
-                cb_bands.push(band_cb);
-                cr_bands.push(band_cr);
-            }
-
-            y_subs_opt[lv] = Some((y_bands.remove(0), y_bands.remove(0), y_bands.remove(0)));
-            cb_subs_opt[lv] = Some((cb_bands.remove(0), cb_bands.remove(0), cb_bands.remove(0)));
-            cr_subs_opt[lv] = Some((cr_bands.remove(0), cr_bands.remove(0), cr_bands.remove(0)));
+        let ll_step_clamped = ll_step.max(0.1);
+        let mut ll_norm = vec![0.0f64; h * w];
+        for i in 0..(h * w) {
+            ll_norm[i] = prediction[i] + (flat[i] as f64 * ll_step_clamped);
         }
+        let ll_denorm = denormalize_ll(&ll_norm, llm.ll_min, llm.ll_max);
+        ll_arrays.push(Array2::from_shape_vec((h, w), ll_denorm).unwrap());
     }
 
-    // Convert Option -> value (all levels are filled)
-    let y_subs: Vec<_> = y_subs_opt.into_iter().map(|o| o.unwrap()).collect();
-    let cb_subs: Vec<_> = cb_subs_opt.into_iter().map(|o| o.unwrap()).collect();
-    let cr_subs: Vec<_> = cr_subs_opt.into_iter().map(|o| o.unwrap()).collect();
+    // ================================================================
+    // Compute L-channel LL decoded for Ribosome codon map
+    // ================================================================
+    let l_ll_decoded: Vec<f64> = ll_arrays[0].iter().copied().collect();
+    let l_ll_decoded_h = l_ll_h;
+    let l_ll_decoded_w = l_ll_w;
 
-    // MERA inverse disentanglers (if present)
-    let mut y_subs = y_subs;
-    let mut cb_subs = cb_subs;
-    let mut cr_subs = cr_subs;
-    if let Some(ref mera) = v6.mera_angles {
-        undo_post_disentanglers_intra(&mut y_subs, hdr.wv_levels, &mera[0]);
-        undo_post_disentanglers_intra(&mut cb_subs, hdr.wv_levels, &mera[1]);
-        undo_post_disentanglers_intra(&mut cr_subs, hdr.wv_levels, &mera[2]);
-    }
+    // ================================================================
+    // Decode detail subbands (geometric primitives + codon-adaptive dequant)
+    // ================================================================
+    let mut l_subs: Vec<_> = (0..wv_levels).map(|_| (Array2::zeros((0,0)), Array2::zeros((0,0)), Array2::zeros((0,0)))).collect();
+    let mut c1_subs: Vec<_> = (0..wv_levels).map(|_| (Array2::zeros((0,0)), Array2::zeros((0,0)), Array2::zeros((0,0)))).collect();
+    let mut c2_subs: Vec<_> = (0..wv_levels).map(|_| (Array2::zeros((0,0)), Array2::zeros((0,0)), Array2::zeros((0,0)))).collect();
 
-    // --- 3. Inverse wavelet recomposition ---
-    let y_sizes_vec: Vec<(usize, usize)> = hdr.y_sizes.clone();
-    let cb_sizes_vec: Vec<(usize, usize)> = hdr.cb_sizes.clone();
-    let cr_sizes_vec: Vec<(usize, usize)> = hdr.cr_sizes.clone();
+    struct ChannelMeta { sizes: Vec<(usize, usize)>, steps: Vec<[f64; 3]> }
+    let steps_l_clone = steps_l.clone();
+    let channel_metas = [
+        ChannelMeta { sizes: l_sizes.clone(), steps: steps_l },
+        ChannelMeta { sizes: c1_sizes.clone(), steps: steps_c1 },
+        ChannelMeta { sizes: c2_sizes.clone(), steps: steps_c2 },
+    ];
 
-    let y_recon_2d = wavelet::wavelet_recompose(&y_ll_arr, &y_subs, &y_sizes_vec);
-    let cb_recon_2d = wavelet::wavelet_recompose(&cb_ll_arr, &cb_subs, &cb_sizes_vec);
-    let cr_recon_2d = wavelet::wavelet_recompose(&cr_ll_arr, &cr_subs, &cr_sizes_vec);
-
-    // --- 3b. Anti-ringing sigma filter (smooths halos near edges) ---
-    let y_h = y_recon_2d.nrows();
-    let y_w = y_recon_2d.ncols();
-    let mut y_flat: Vec<f64> = y_recon_2d.iter().copied().collect();
-    let step_y_base = hdr.steps_y[0].iter().copied().fold(f64::INFINITY, f64::min);
-    dsp::anti_ring_sigma(&mut y_flat, y_h, y_w, step_y_base);
-
-    let cb_h = cb_recon_2d.nrows();
-    let cb_w = cb_recon_2d.ncols();
-    let cr_h = cr_recon_2d.nrows();
-    let cr_w = cr_recon_2d.ncols();
-    let mut cb_flat: Vec<f64> = cb_recon_2d.iter().copied().collect();
-    let mut cr_flat: Vec<f64> = cr_recon_2d.iter().copied().collect();
-    let step_c_base = hdr.steps_c[0].iter().copied().fold(f64::INFINITY, f64::min);
-    let step_cr_base = hdr.steps_cr[0].iter().copied().fold(f64::INFINITY, f64::min);
-    dsp::anti_ring_sigma(&mut cb_flat, cb_h, cb_w, step_c_base);
-    dsp::anti_ring_sigma(&mut cr_flat, cr_h, cr_w, step_cr_base);
-
-    // --- 4. Final conversion to RGB ---
-    let n = height * width;
-
-    if v6.aurea_v2 {
-        // GCT: upsample chromas C1/C2 (4:2:0) then inverse Golden Color Transform
-        let c1_up = color::upsample_420(&cb_flat, cb_h, cb_w, height, width);
-        let c2_up = color::upsample_420(&cr_flat, cr_h, cr_w, height, width);
-        let (r_f, g_f, b_f) = color::golden_rotate_inverse(&y_flat, &c1_up, &c2_up, n);
-        let mut rgb = vec![0u8; n * 3];
-        for i in 0..n {
-            rgb[i * 3]     = r_f[i].clamp(0.0, 255.0).round() as u8;
-            rgb[i * 3 + 1] = g_f[i].clamp(0.0, 255.0).round() as u8;
-            rgb[i * 3 + 2] = b_f[i].clamp(0.0, 255.0).round() as u8;
-        }
-        Ok(DecodedImage { rgb, width, height })
-    } else {
-        // YCbCr -> RGB with chroma upsample
-        for v in y_flat.iter_mut() {
-            *v = v.clamp(0.0, 255.0);
-        }
-
-        let cb_up = color::upsample_420(&cb_flat, cb_h, cb_w, height, width);
-        let cr_up = color::upsample_420(&cr_flat, cb_h, cb_w, height, width);
-
-        let cb_clipped: Vec<f64> = cb_up.iter().map(|v| v.clamp(0.0, 255.0)).collect();
-        let cr_clipped: Vec<f64> = cr_up.iter().map(|v| v.clamp(0.0, 255.0)).collect();
-
-        let rgb = color::ycbcr_to_rgb(&y_flat, &cb_clipped, &cr_clipped, n);
-
-        Ok(DecodedImage { rgb, width, height })
-    }
-}
-
-/// Decode a detail band with size prefix (u32 LE).
-fn decode_band_with_size_prefix(
-    det: &[u8], pos: usize, h: usize, w: usize, step: f64, flags: u8,
-) -> (Array2<f64>, usize) {
-    let band_size = u32::from_le_bytes([
-        det[pos], det[pos + 1], det[pos + 2], det[pos + 3],
-    ]) as usize;
-    let data_start = pos + 4;
-    let (band, _consumed_p) = wavelet::decode_detail_band_v2(
-        det, data_start, h, w, step, flags,
-    );
-    (band, data_start + band_size)
-}
-
-/// Decode a detail band according to the stream format.
-fn decode_one_band(
-    v6: &X267V6Stream, det: &[u8], p: usize,
-    h: usize, w: usize, step: f64, flags: u8,
-) -> (Array2<f64>, usize) {
-    if v6.band_size_prefixed {
-        if v6.aurea_bands {
-            aurea::decode_aurea_band_with_prefix(det, p, h, w, step)
-        } else {
-            decode_band_with_size_prefix(det, p, h, w, step, flags)
-        }
-    } else {
-        wavelet::decode_detail_band_v2(det, p, h, w, step, flags)
-    }
-}
-
-/// Access band bi from a (LH, HL, HH) tuple.
-fn band_ref(subs: &(Array2<f64>, Array2<f64>, Array2<f64>), bi: usize) -> &Array2<f64> {
-    match bi {
-        0 => &subs.0,
-        1 => &subs.1,
-        _ => &subs.2,
-    }
-}
-
-/// Inverse in-place Givens rotation between two subbands.
-fn cross_subband_rotate_inv(a: &mut Array2<f64>, b: &mut Array2<f64>, theta: f64) {
-    let c = theta.cos();
-    let s = (-theta).sin(); // inverse rotation = -theta
-    let c_inv = c; // cos(-theta) = cos(theta)
-    let s_inv = s; // sin(-theta) = -sin(theta)
-    let h = a.nrows().min(b.nrows());
-    let w = a.ncols().min(b.ncols());
-    for i in 0..h {
-        for j in 0..w {
-            let av = a[[i, j]];
-            let bv = b[[i, j]];
-            a[[i, j]] = c_inv * av - s_inv * bv;
-            b[[i, j]] = s_inv * av + c_inv * bv;
-        }
-    }
-}
-
-/// Inverse of intra-scale MERA post-disentanglers.
-fn undo_post_disentanglers_intra(
-    subs: &mut Vec<(Array2<f64>, Array2<f64>, Array2<f64>)>,
-    wv_levels: usize,
-    angles: &[[f64; 6]],
-) {
     for lv in (0..wv_levels).rev() {
-        let (ref mut lh, ref mut hl, ref mut hh) = subs[lv];
-        cross_subband_rotate_inv(hl, hh, angles[lv][5]);
-        cross_subband_rotate_inv(lh, hh, angles[lv][4]);
-        cross_subband_rotate_inv(lh, hl, angles[lv][3]);
+        for (ch_idx, ch_meta) in channel_metas.iter().enumerate() {
+
+            // Read geometric primitives (supercordes phi)
+            let (primitives, prim_bytes) = geometric::deserialize_primitives(&body[pos..]);
+            pos += prim_bytes;
+
+            let mut decoded_bands = Vec::with_capacity(3);
+            for bi in 0..3 {
+                let rans_size = read_u32(body, &mut pos) as usize;
+                let band_h = read_u16(body, &mut pos) as usize;
+                let band_w = read_u16(body, &mut pos) as usize;
+                let rans_data = &body[pos..pos + rans_size]; pos += rans_size;
+
+                let n_coeffs = band_h * band_w;
+                let (ordered_coeffs, _) = rans::rans_decode_band(rans_data, n_coeffs);
+
+                let flat = if band_h > 0 && band_w > 0 {
+                    let order = wavelet::morton_order(band_h, band_w);
+                    let mut raster = vec![0i16; n_coeffs];
+                    for (morton_pos, &raster_pos) in order.iter().enumerate() {
+                        raster[raster_pos] = ordered_coeffs[morton_pos];
+                    }
+                    raster
+                } else { ordered_coeffs };
+
+                let q_band = Array2::from_shape_vec((band_h, band_w), flat.iter().map(|&v| v as f64).collect()).unwrap();
+                let step = ch_meta.steps[lv][bi].max(0.1);
+                // Codon-adaptive dequantization for ALL channels
+                let dq_band = if !l_ll_decoded.is_empty() {
+                    let step_map = wavelet::codon_step_map(
+                        &l_ll_decoded, l_ll_decoded_h, l_ll_decoded_w,
+                        band_h, band_w,
+                        height, width, step,
+                    );
+                    wavelet::dequantize_band_map(&q_band, &step_map)
+                } else {
+                    wavelet::dequantize_band(&q_band, step)
+                };
+                decoded_bands.push(dq_band);
+            }
+
+            // Render geometric primitives and add to decoded residual
+            let (lh_band, hl_band, hh_band) = if !primitives.is_empty() {
+                let h_lh = decoded_bands[0].nrows(); let w_lh = decoded_bands[0].ncols();
+                let h_hl = decoded_bands[1].nrows(); let w_hl = decoded_bands[1].ncols();
+                let h_hh = decoded_bands[2].nrows(); let w_hh = decoded_bands[2].ncols();
+                let (pred_lh, pred_hl, pred_hh) = geometric::render_primitives(
+                    &primitives, h_lh, w_lh, h_hl, w_hl, h_hh, w_hh,
+                );
+                let mut lh = decoded_bands.remove(0);
+                let mut hl = decoded_bands.remove(0);
+                let mut hh = decoded_bands.remove(0);
+
+                for r in 0..lh.nrows() { for c in 0..lh.ncols() { lh[[r, c]] += pred_lh[[r, c]]; } }
+                for r in 0..hl.nrows() { for c in 0..hl.ncols() { hl[[r, c]] += pred_hl[[r, c]]; } }
+                for r in 0..hh.nrows() { for c in 0..hh.ncols() { hh[[r, c]] += pred_hh[[r, c]]; } }
+                (lh, hl, hh)
+            } else {
+                (decoded_bands.remove(0), decoded_bands.remove(0), decoded_bands.remove(0))
+            };
+
+            match ch_idx {
+                0 => l_subs[lv] = (lh_band, hl_band, hh_band),
+                1 => c1_subs[lv] = (lh_band, hl_band, hh_band),
+                2 => c2_subs[lv] = (lh_band, hl_band, hh_band),
+                _ => unreachable!(),
+            }
+        }
     }
+
+    // Passe 3: Chaperonne multi-échelle — propagation inter-niveaux
+    if header.version >= 1 {
+        // Passe 3a: Chaperonne — propage l'énergie structurelle deep→fine
+        dsp::chaperone_multiscale(
+            &mut l_subs, &steps_l_clone,
+            &l_ll_decoded, l_ll_decoded_h, l_ll_decoded_w,
+            height, width, wv_levels,
+        );
+    }
+
+    let l_recon = wavelet::wavelet_recompose(&ll_arrays[0], &l_subs, &l_sizes);
+    let c1_recon = wavelet::wavelet_recompose(&ll_arrays[1], &c1_subs, &c1_sizes);
+    let c2_recon = wavelet::wavelet_recompose(&ll_arrays[2], &c2_subs, &c2_sizes);
+
+    let mut l_flat: Vec<f64> = l_recon.iter().copied().collect();
+    let c1_sub_flat: Vec<f64> = c1_recon.iter().copied().collect();
+    let c2_sub_flat: Vec<f64> = c2_recon.iter().copied().collect();
+
+    dsp::anti_ring_sigma(&mut l_flat, height, width, detail_step);
+
+    if header.version >= 1 {
+        use golden::PTF_GAMMA_INV;
+        let inv255 = 1.0 / 255.0;
+        for v in l_flat.iter_mut() {
+            *v = 255.0 * (*v * inv255).clamp(0.0, 1.0).powf(PTF_GAMMA_INV);
+        }
+    }
+
+    let c1_full = color::upsample_420(&c1_sub_flat, c1_h, c1_w, height, width);
+    let c2_full = color::upsample_422(&c2_sub_flat, c2_h, c2_w, width);
+    let n = width * height;
+    let (r_plane, g_plane, b_plane) = color::golden_rotate_inverse(&l_flat, &c1_full, &c2_full, n);
+
+    let mut rgb = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        rgb.push(r_plane[i].round().clamp(0.0, 255.0) as u8);
+        rgb.push(g_plane[i].round().clamp(0.0, 255.0) as u8);
+        rgb.push(b_plane[i].round().clamp(0.0, 255.0) as u8);
+    }
+
+    Ok(DecodedImage { rgb, width, height })
 }
 
-/// Denormalize an LL plane from [0,255] to [min, max].
 fn denormalize_ll(data: &[f64], ll_min: f32, ll_max: f32) -> Vec<f64> {
     let mut range = ll_max as f64 - ll_min as f64;
-    if range.abs() < 1e-6 {
-        range = 1.0;
-    }
+    if range.abs() < 1e-6 { range = 1.0; }
     data.iter().map(|&v| v * range / 255.0 + ll_min as f64).collect()
 }
 
-/// Normalize an LL plane to [0, 255]. Returns (normalized, min, max).
 pub fn normalize_ll(data: &[f64]) -> (Vec<f64>, f64, f64) {
     let ll_min = data.iter().copied().fold(f64::INFINITY, f64::min);
     let ll_max = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let mut range = ll_max - ll_min;
-    if range < 1e-6 {
-        range = 1.0;
-    }
+    if range < 1e-6 { range = 1.0; }
     let norm: Vec<f64> = data.iter().map(|&v| (v - ll_min) * 255.0 / range).collect();
     (norm, ll_min, ll_max)
+}
+
+// ======================================================================
+// v2: LOT (Lapped Orthogonal Transform) decoder
+// ======================================================================
+
+const LOT_BLOCK_SIZE: usize = 16;
+const LOT_AC_PER_BLOCK: usize = LOT_BLOCK_SIZE * LOT_BLOCK_SIZE - 1; // 255
+
+/// Zigzag scan order for a block_size x block_size block (AC coefficients only).
+/// Returns indices in row-major order, skipping index 0 (DC).
+/// Must match the encoder's ac_zigzag_order exactly.
+fn ac_zigzag_order(block_size: usize) -> Vec<usize> {
+    let n = block_size;
+    let mut order = Vec::with_capacity(n * n - 1);
+
+    for s in 0..(2 * n - 1) {
+        if s % 2 == 0 {
+            let i_start = s.min(n - 1);
+            let i_end = if s >= n { s - n + 1 } else { 0 };
+            let mut i = i_start as i64;
+            while i >= i_end as i64 {
+                let j = s - i as usize;
+                let idx = i as usize * n + j;
+                if idx != 0 {
+                    order.push(idx);
+                }
+                i -= 1;
+            }
+        } else {
+            let i_start = if s >= n { s - n + 1 } else { 0 };
+            let i_end = s.min(n - 1);
+            for i in i_start..=i_end {
+                let j = s - i;
+                let idx = i * n + j;
+                if idx != 0 {
+                    order.push(idx);
+                }
+            }
+        }
+    }
+
+    order
+}
+
+/// LOT v2 decoder: AUR2 header -> DC + AC -> LOT synthesis -> anti-ring -> PTF inv -> GCT inv -> RGB.
+fn decode_aur2_lot(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std::error::Error>> {
+    let (header, header_size) = bitstream::parse_aur2_header(file_data)?;
+    let width = header.width;
+    let height = header.height;
+    let detail_step = header.detail_step;
+    let ll_ranges = header.ll_ranges;  // DC min/max per channel
+
+    let body = &file_data[header_size..];
+    let mut pos = 0usize;
+
+    let read_u16 = |data: &[u8], p: &mut usize| -> u16 {
+        let v = u16::from_le_bytes([data[*p], data[*p + 1]]);
+        *p += 2; v
+    };
+    let read_u32 = |data: &[u8], p: &mut usize| -> u32 {
+        let v = u32::from_le_bytes([data[*p], data[*p + 1], data[*p + 2], data[*p + 3]]);
+        *p += 4; v
+    };
+    let read_f32 = |data: &[u8], p: &mut usize| -> f32 {
+        let v = f32::from_le_bytes([data[*p], data[*p + 1], data[*p + 2], data[*p + 3]]);
+        *p += 4; v
+    };
+
+    // 1. Parse body
+    let c1_h = read_u16(body, &mut pos) as usize;
+    let c1_w = read_u16(body, &mut pos) as usize;
+    let c2_h = read_u16(body, &mut pos) as usize;
+    let c2_w = read_u16(body, &mut pos) as usize;
+
+    let _body_detail_step = read_f32(body, &mut pos) as f64;
+
+    // Precompute AC zigzag order (must match encoder)
+    let zz_order = ac_zigzag_order(LOT_BLOCK_SIZE);
+
+    // Channel dimensions for LOT reconstruction
+    struct ChannelInfo {
+        chan_h: usize,
+        chan_w: usize,
+        dc_min: f64,
+        dc_max: f64,
+        chroma_factor: f64,
+    }
+
+    let channel_infos = [
+        ChannelInfo {
+            chan_h: height, chan_w: width,
+            dc_min: ll_ranges[0].0 as f64, dc_max: ll_ranges[0].1 as f64,
+            chroma_factor: 1.0,
+        },
+        ChannelInfo {
+            chan_h: c1_h, chan_w: c1_w,
+            dc_min: ll_ranges[1].0 as f64, dc_max: ll_ranges[1].1 as f64,
+            chroma_factor: crate::golden::PHI,
+        },
+        ChannelInfo {
+            chan_h: c2_h, chan_w: c2_w,
+            dc_min: ll_ranges[2].0 as f64, dc_max: ll_ranges[2].1 as f64,
+            chroma_factor: 1.0,
+        },
+    ];
+
+    let dc_step = (detail_step * 0.5).max(0.5);
+    let dc_step_clamped = dc_step.max(0.1);
+
+    // We need to decode L channel DC first for codon-adaptive AC dequant,
+    // but we also need all channels. So: two-pass approach.
+    // Pass 1: read all raw data from body. Pass 2: reconstruct.
+
+    // Read all channel data
+    struct ChannelRawData {
+        grid_h: usize,
+        grid_w: usize,
+        dc_q: Vec<i16>,   // quantized DC (raster order)
+        ac_q: Vec<i16>,   // quantized AC (flat, zigzag-within-block)
+    }
+
+    let mut raw_channels: Vec<ChannelRawData> = Vec::with_capacity(3);
+
+    for _ch_idx in 0..3 {
+        let grid_h = read_u16(body, &mut pos) as usize;
+        let grid_w = read_u16(body, &mut pos) as usize;
+        let n_blocks = grid_h * grid_w;
+
+        // Decode DC
+        let dc_rans_size = read_u32(body, &mut pos) as usize;
+        let dc_rans_data = &body[pos..pos + dc_rans_size];
+        pos += dc_rans_size;
+
+        let n_dc = n_blocks;
+        let (dc_ordered, _) = rans::rans_decode_band(dc_rans_data, n_dc);
+
+        // Un-Morton the DC
+        let dc_q = if grid_h > 0 && grid_w > 0 {
+            let order = wavelet::morton_order(grid_h, grid_w);
+            let mut raster = vec![0i16; n_dc];
+            for (morton_pos, &raster_pos) in order.iter().enumerate() {
+                raster[raster_pos] = dc_ordered[morton_pos];
+            }
+            raster
+        } else {
+            dc_ordered
+        };
+
+        // Decode AC
+        let ac_rans_size = read_u32(body, &mut pos) as usize;
+        let ac_rans_data = &body[pos..pos + ac_rans_size];
+        pos += ac_rans_size;
+
+        let total_ac = n_blocks * LOT_AC_PER_BLOCK;
+        let (ac_q, _) = rans::rans_decode_band(ac_rans_data, total_ac);
+
+        raw_channels.push(ChannelRawData { grid_h, grid_w, dc_q, ac_q });
+    }
+
+    // Dequantize DC for all 3 channels (needed for codon 3D)
+    let l_raw = &raw_channels[0];
+    let l_dc_range = (channel_infos[0].dc_max - channel_infos[0].dc_min).max(1e-6);
+    let l_dc_denorm: Vec<f64> = l_raw.dc_q.iter().map(|&q| {
+        let dc_norm = q as f64 * dc_step_clamped;
+        dc_norm * l_dc_range / 255.0 + channel_infos[0].dc_min
+    }).collect();
+    let c1_dc_range = (channel_infos[1].dc_max - channel_infos[1].dc_min).max(1e-6);
+    let c1_dc_denorm: Vec<f64> = raw_channels[1].dc_q.iter().map(|&q| {
+        let dc_norm = q as f64 * dc_step_clamped;
+        dc_norm * c1_dc_range / 255.0 + channel_infos[1].dc_min
+    }).collect();
+    let c2_dc_range = (channel_infos[2].dc_max - channel_infos[2].dc_min).max(1e-6);
+    let c2_dc_denorm: Vec<f64> = raw_channels[2].dc_q.iter().map(|&q| {
+        let dc_norm = q as f64 * dc_step_clamped;
+        dc_norm * c2_dc_range / 255.0 + channel_infos[2].dc_min
+    }).collect();
+
+    // Reconstruct each channel
+    let mut reconstructed_channels: Vec<Vec<f64>> = Vec::with_capacity(3);
+
+    for (ch_idx, raw) in raw_channels.iter().enumerate() {
+        let info = &channel_infos[ch_idx];
+        let dc_range = (info.dc_max - info.dc_min).max(1e-6);
+        let n_blocks = raw.grid_h * raw.grid_w;
+
+        // Dequantize DC: q * step -> normalized DC -> denormalize
+        let dc_denorm: Vec<f64> = raw.dc_q.iter().map(|&q| {
+            let dc_norm = q as f64 * dc_step_clamped;
+            dc_norm * dc_range / 255.0 + info.dc_min
+        }).collect();
+
+        // Dequantize AC into per-block vectors
+        let lot_global_factor = 3.8; // e ≈ 2.71828 (Euler)
+        let ac_step = detail_step * info.chroma_factor * lot_global_factor;
+        let mut ac_blocks: Vec<Vec<f64>> = Vec::with_capacity(n_blocks);
+
+        // Build inverse zigzag: from flat zigzag position -> row-major AC position
+        // zz_order[flat_pos] = block_row_major_index (1-based), so AC index = zz_order[flat_pos] - 1
+        let mut inv_zz = vec![0usize; LOT_AC_PER_BLOCK];
+        for (flat_pos, &block_idx) in zz_order.iter().enumerate() {
+            inv_zz[flat_pos] = block_idx - 1; // block_idx is 1-based (after DC)
+        }
+
+        for block_idx in 0..n_blocks {
+            let ac_offset = block_idx * LOT_AC_PER_BLOCK;
+            let mut ac = vec![0.0f64; LOT_AC_PER_BLOCK];
+
+            // Codon 3D: luminance × saturation × detail (gravitational lens)
+            // First pass: compute AC energy from quantized values
+            let ac_energy: f64 = (0..LOT_AC_PER_BLOCK).map(|fp| {
+                raw.ac_q[ac_offset + fp].abs() as f64
+            }).sum();
+            // Map block to DC grids (different sizes per channel)
+            let l_idx = (block_idx as f64 * l_dc_denorm.len() as f64
+                        / n_blocks.max(1) as f64) as usize;
+            let c1_idx = (block_idx as f64 * c1_dc_denorm.len() as f64
+                         / n_blocks.max(1) as f64) as usize;
+            let c2_idx = (block_idx as f64 * c2_dc_denorm.len() as f64
+                         / n_blocks.max(1) as f64) as usize;
+            let dc_l = l_dc_denorm[l_idx.min(l_dc_denorm.len().saturating_sub(1))];
+            let dc_c1 = c1_dc_denorm[c1_idx.min(c1_dc_denorm.len().saturating_sub(1))];
+            let dc_c2 = c2_dc_denorm[c2_idx.min(c2_dc_denorm.len().saturating_sub(1))];
+            let codon_factor = lot::codon_3d_factor(
+                dc_l, dc_c1, dc_c2, ac_energy, LOT_AC_PER_BLOCK,
+            );
+            let local_step = ac_step * codon_factor;
+            let step_clamped = local_step.max(0.1);
+
+            for flat_pos in 0..LOT_AC_PER_BLOCK {
+                let qi = raw.ac_q[ac_offset + flat_pos];
+                let ac_idx = inv_zz[flat_pos]; // destination in row-major AC (0-based)
+                let block_idx = zz_order[flat_pos]; // 1-based block position
+                let qfactor = lot::qmat_for_block_size(block_idx / LOT_BLOCK_SIZE, block_idx % LOT_BLOCK_SIZE, LOT_BLOCK_SIZE).max(0.1).powf(0.55);
+                ac[ac_idx] = qi as f64 * step_clamped * qfactor;
+            }
+
+            ac_blocks.push(ac);
+        }
+
+        // LOT synthesis
+        let recon = lot::lot_synthesize_image(
+            &dc_denorm, &ac_blocks,
+            raw.grid_h, raw.grid_w,
+            info.chan_h, info.chan_w,
+            LOT_BLOCK_SIZE,
+        );
+
+        reconstructed_channels.push(recon);
+    }
+
+    // Extract channels
+    let mut l_flat = reconstructed_channels.remove(0);
+    let mut c1_sub_flat = reconstructed_channels.remove(0);
+    let mut c2_sub_flat = reconstructed_channels.remove(0);
+
+    // Scene analysis from DC grid → adapt filter strength
+    let scene_profile = scene_analysis::analyze_dc_grid(
+        &l_dc_denorm, l_raw.grid_h, l_raw.grid_w,
+    );
+    eprintln!("  Scene: {:?}, smooth={:.0}%, aniso={:.3}, velvet_strength={:.2}",
+              scene_profile.scene_type, scene_profile.smooth_pct,
+              scene_profile.anisotropy, scene_profile.velvet_strength);
+
+    // Biomimetic deblocking on ALL channels (L + chroma in subsampled space)
+    dsp::deblock_lot_grid(&mut l_flat, height, width, LOT_BLOCK_SIZE);
+    dsp::velvet_gas_filter(&mut l_flat, height, width, LOT_BLOCK_SIZE,
+                           scene_profile.velvet_strength);
+    {
+        let mut c1_mut = c1_sub_flat.clone();
+        let mut c2_mut = c2_sub_flat.clone();
+        dsp::deblock_lot_grid(&mut c1_mut, c1_h, c1_w, LOT_BLOCK_SIZE);
+        dsp::deblock_lot_grid(&mut c2_mut, c2_h, c2_w, LOT_BLOCK_SIZE);
+        dsp::velvet_gas_filter(&mut c1_mut, c1_h, c1_w, LOT_BLOCK_SIZE,
+                               scene_profile.velvet_strength);
+        dsp::velvet_gas_filter(&mut c2_mut, c2_h, c2_w, LOT_BLOCK_SIZE,
+                               scene_profile.velvet_strength);
+        c1_sub_flat = c1_mut;
+        c2_sub_flat = c2_mut;
+    }
+
+    // Anti-ring sigma filter on L
+    dsp::anti_ring_sigma(&mut l_flat, height, width, detail_step);
+
+    // PTF inverse on L
+    {
+        use golden::PTF_GAMMA_INV;
+        let inv255 = 1.0 / 255.0;
+        for v in l_flat.iter_mut() {
+            *v = 255.0 * (*v * inv255).clamp(0.0, 1.0).powf(PTF_GAMMA_INV);
+        }
+    }
+
+    // Upsample chroma
+    let c1_full = color::upsample_420(&c1_sub_flat, c1_h, c1_w, height, width);
+    let c2_full = color::upsample_422(&c2_sub_flat, c2_h, c2_w, width);
+
+    // GCT inverse -> RGB
+    let n = width * height;
+    let (r_plane, g_plane, b_plane) = color::golden_rotate_inverse(&l_flat, &c1_full, &c2_full, n);
+
+    let mut rgb = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        rgb.push(r_plane[i].round().clamp(0.0, 255.0) as u8);
+        rgb.push(g_plane[i].round().clamp(0.0, 255.0) as u8);
+        rgb.push(b_plane[i].round().clamp(0.0, 255.0) as u8);
+    }
+
+    Ok(DecodedImage { rgb, width, height })
+}
+
+// ======================================================================
+// v3: LOT decoder with all 8 improvement points
+// ======================================================================
+
+fn decode_aur2_v3(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std::error::Error>> {
+    use aurea_encoder::{FLAG_CSF_MODULATION, FLAG_CHROMA_RESIDUAL, FLAG_STRUCTURAL, FLAG_DPCM_DC};
+
+    let (header, header_size) = bitstream::parse_aur2_header(file_data)?;
+    let width = header.width;
+    let height = header.height;
+    let detail_step = header.detail_step;
+    let ll_ranges = header.ll_ranges;
+
+    let body = &file_data[header_size..];
+    let mut pos = 0usize;
+
+    let read_u16 = |data: &[u8], p: &mut usize| -> u16 {
+        let v = u16::from_le_bytes([data[*p], data[*p + 1]]);
+        *p += 2; v
+    };
+    let read_u32 = |data: &[u8], p: &mut usize| -> u32 {
+        let v = u32::from_le_bytes([data[*p], data[*p + 1], data[*p + 2], data[*p + 3]]);
+        *p += 4; v
+    };
+
+    // 1. Parse body header
+    let c1_h = read_u16(body, &mut pos) as usize;
+    let c1_w = read_u16(body, &mut pos) as usize;
+    let c2_h = read_u16(body, &mut pos) as usize;
+    let c2_w = read_u16(body, &mut pos) as usize;
+
+    // v3: flags + scene_type
+    let flags = read_u16(body, &mut pos);
+    let _scene_type = body[pos]; pos += 1;
+    let _reserved = body[pos]; pos += 1;
+
+    let use_csf = flags & FLAG_CSF_MODULATION != 0;
+    let use_chroma_resid = flags & FLAG_CHROMA_RESIDUAL != 0;
+    let _use_structural = flags & FLAG_STRUCTURAL != 0;
+    let use_dpcm = flags & FLAG_DPCM_DC != 0;
+
+    eprintln!("  AUR2 v3 decode: {}x{}, flags=0x{:04x}", width, height, flags);
+
+    // Precompute AC zigzag order
+    let zz_order = ac_zigzag_order(LOT_BLOCK_SIZE);
+
+    struct ChannelInfo {
+        chan_h: usize, chan_w: usize,
+        dc_min: f64, dc_max: f64,
+        chroma_factor: f64,
+    }
+
+    let channel_infos = [
+        ChannelInfo { chan_h: height, chan_w: width,
+            dc_min: ll_ranges[0].0 as f64, dc_max: ll_ranges[0].1 as f64,
+            chroma_factor: 1.0 },
+        ChannelInfo { chan_h: c1_h, chan_w: c1_w,
+            dc_min: ll_ranges[1].0 as f64, dc_max: ll_ranges[1].1 as f64,
+            chroma_factor: crate::golden::PHI },
+        ChannelInfo { chan_h: c2_h, chan_w: c2_w,
+            dc_min: ll_ranges[2].0 as f64, dc_max: ll_ranges[2].1 as f64,
+            chroma_factor: 1.0 },
+    ];
+
+    let dc_step = (detail_step * 0.1).max(0.2);
+    let dc_step_clamped = dc_step.max(0.1);
+
+    // Read all channel raw data
+    struct ChannelRawData {
+        grid_h: usize, grid_w: usize,
+        dc_q: Vec<i16>, ac_q: Vec<i16>,
+    }
+
+    let mut raw_channels: Vec<ChannelRawData> = Vec::with_capacity(3);
+
+    for _ch_idx in 0..3 {
+        let grid_h = read_u16(body, &mut pos) as usize;
+        let grid_w = read_u16(body, &mut pos) as usize;
+        let n_blocks = grid_h * grid_w;
+
+        let dc_rans_size = read_u32(body, &mut pos) as usize;
+        let (dc_ordered, _) = rans::rans_decode_band(&body[pos..pos + dc_rans_size], n_blocks);
+        pos += dc_rans_size;
+
+        let dc_q = if use_dpcm {
+            // DPCM: rANS gives residuals in raster order, reconstruct absolute DC
+            let mut abs_dc = vec![0i16; n_blocks];
+            for gy in 0..grid_h {
+                for gx in 0..grid_w {
+                    let pred = aurea_encoder::golden_dc_predict(&abs_dc, gy, gx, grid_w);
+                    abs_dc[gy * grid_w + gx] = dc_ordered[gy * grid_w + gx] + pred;
+                }
+            }
+            abs_dc
+        } else if grid_h > 0 && grid_w > 0 {
+            let order = wavelet::morton_order(grid_h, grid_w);
+            let mut raster = vec![0i16; n_blocks];
+            for (morton_pos, &raster_pos) in order.iter().enumerate() {
+                raster[raster_pos] = dc_ordered[morton_pos];
+            }
+            raster
+        } else { dc_ordered };
+
+        let ac_rans_size = read_u32(body, &mut pos) as usize;
+        let total_ac = n_blocks * LOT_AC_PER_BLOCK;
+        let (ac_q, _) = rans::rans_decode_band(&body[pos..pos + ac_rans_size], total_ac);
+        pos += ac_rans_size;
+
+        raw_channels.push(ChannelRawData { grid_h, grid_w, dc_q, ac_q });
+    }
+
+    // Dequantize DC for codon 3D/4D
+    let l_raw = &raw_channels[0];
+    let l_dc_range = (channel_infos[0].dc_max - channel_infos[0].dc_min).max(1e-6);
+    let l_dc_denorm: Vec<f64> = l_raw.dc_q.iter().map(|&q|
+        q as f64 * dc_step_clamped * l_dc_range / 255.0 + channel_infos[0].dc_min
+    ).collect();
+    let c1_dc_range = (channel_infos[1].dc_max - channel_infos[1].dc_min).max(1e-6);
+    let c1_dc_denorm: Vec<f64> = raw_channels[1].dc_q.iter().map(|&q|
+        q as f64 * dc_step_clamped * c1_dc_range / 255.0 + channel_infos[1].dc_min
+    ).collect();
+    let c2_dc_range = (channel_infos[2].dc_max - channel_infos[2].dc_min).max(1e-6);
+    let c2_dc_denorm: Vec<f64> = raw_channels[2].dc_q.iter().map(|&q|
+        q as f64 * dc_step_clamped * c2_dc_range / 255.0 + channel_infos[2].dc_min
+    ).collect();
+
+    // Reconstruct each channel
+    let mut reconstructed_channels: Vec<Vec<f64>> = Vec::with_capacity(3);
+
+    for (ch_idx, raw) in raw_channels.iter().enumerate() {
+        let info = &channel_infos[ch_idx];
+        let dc_range = (info.dc_max - info.dc_min).max(1e-6);
+        let n_blocks = raw.grid_h * raw.grid_w;
+
+        let dc_denorm: Vec<f64> = raw.dc_q.iter().map(|&q|
+            q as f64 * dc_step_clamped * dc_range / 255.0 + info.dc_min
+        ).collect();
+
+        let lot_global_factor = 3.8;
+        let ac_step = detail_step * info.chroma_factor * lot_global_factor;
+        let mut ac_blocks: Vec<Vec<f64>> = Vec::with_capacity(n_blocks);
+
+        let mut inv_zz = vec![0usize; LOT_AC_PER_BLOCK];
+        for (flat_pos, &block_idx) in zz_order.iter().enumerate() {
+            inv_zz[flat_pos] = block_idx - 1;
+        }
+
+        for block_idx in 0..n_blocks {
+            let ac_offset = block_idx * LOT_AC_PER_BLOCK;
+            let mut ac = vec![0.0f64; LOT_AC_PER_BLOCK];
+
+            // Compute AC energy for codon
+            let ac_energy: f64 = (0..LOT_AC_PER_BLOCK).map(|fp|
+                raw.ac_q[ac_offset + fp].abs() as f64
+            ).sum();
+
+            let l_idx = (block_idx as f64 * l_dc_denorm.len() as f64
+                        / n_blocks.max(1) as f64) as usize;
+            let c1_idx = (block_idx as f64 * c1_dc_denorm.len() as f64
+                         / n_blocks.max(1) as f64) as usize;
+            let c2_idx = (block_idx as f64 * c2_dc_denorm.len() as f64
+                         / n_blocks.max(1) as f64) as usize;
+            let dc_l = l_dc_denorm[l_idx.min(l_dc_denorm.len().saturating_sub(1))];
+            let dc_c1 = c1_dc_denorm[c1_idx.min(c1_dc_denorm.len().saturating_sub(1))];
+            let dc_c2 = c2_dc_denorm[c2_idx.min(c2_dc_denorm.len().saturating_sub(1))];
+
+            // Codon factor: 3D or 4D based on flags
+            // Note: for 4D at decoder, we first dequantize with 3D, then could refine.
+            // But structural coherence requires AC values which we're computing.
+            // Use 3D for initial dequant (same as encoder's codon_3d_factor).
+            let codon_factor = lot::codon_3d_factor(dc_l, dc_c1, dc_c2, ac_energy, LOT_AC_PER_BLOCK);
+            let local_step = ac_step * codon_factor;
+            let step_clamped = local_step.max(0.1);
+
+            for flat_pos in 0..LOT_AC_PER_BLOCK {
+                let qi = raw.ac_q[ac_offset + flat_pos];
+                let ac_idx = inv_zz[flat_pos];
+                let block_pos = zz_order[flat_pos]; // 1-based block position
+                let mut qfactor = lot::qmat_for_block_size(block_pos / LOT_BLOCK_SIZE, block_pos % LOT_BLOCK_SIZE, LOT_BLOCK_SIZE).max(0.1).powf(0.55);
+
+                // Point 5: CSF modulation (must match encoder)
+                if use_csf {
+                    let row = block_pos / LOT_BLOCK_SIZE;
+                    let col = block_pos % LOT_BLOCK_SIZE;
+                    let csf = lot::csf_qmat_factor(row, col, LOT_BLOCK_SIZE, dc_l);
+                    qfactor *= csf;
+                }
+
+                ac[ac_idx] = qi as f64 * step_clamped * qfactor;
+            }
+
+            // Point 4: If structural flag, apply structural coherence correction
+            // The decoder uses the dequantized AC to compute structural factor,
+            // then scales accordingly. Since encoder used 4D factor on step,
+            // decoder must match. The 3D factor is already applied above.
+            // Structural factor was baked into the encoder's quantization step,
+            // so the decoder automatically recovers it through the same dequant formula.
+            // No additional correction needed here.
+
+            ac_blocks.push(ac);
+        }
+
+        // Fibonacci spectral spin: median regularization of AC
+        {
+            let local_steps: Vec<f64> = (0..n_blocks).map(|bi| {
+                let l_idx = (bi as f64 * l_dc_denorm.len() as f64
+                            / n_blocks.max(1) as f64) as usize;
+                let dc_l = l_dc_denorm[l_idx.min(l_dc_denorm.len().saturating_sub(1))];
+                let codon = lot::codon_dc_factor(dc_l, 0.0, 0.0);
+                ac_step * codon
+            }).collect();
+            spin::fibonacci_spectral_spin(
+                &mut ac_blocks, raw.grid_h, raw.grid_w,
+                LOT_AC_PER_BLOCK, &local_steps,
+            );
+        }
+
+        let recon = lot::lot_synthesize_image(
+            &dc_denorm, &ac_blocks,
+            raw.grid_h, raw.grid_w,
+            info.chan_h, info.chan_w,
+            LOT_BLOCK_SIZE,
+        );
+
+        reconstructed_channels.push(recon);
+    }
+
+    let mut l_flat = reconstructed_channels.remove(0);
+    let mut c1_sub_flat = reconstructed_channels.remove(0);
+    let mut c2_sub_flat = reconstructed_channels.remove(0);
+
+    // Gas-only deblocking: chirurgical, only at block boundaries in smooth zones
+    dsp::deblock_gas_only(&mut l_flat, height, width, LOT_BLOCK_SIZE);
+    dsp::deblock_gas_only(&mut c1_sub_flat, c1_h, c1_w, LOT_BLOCK_SIZE);
+    dsp::deblock_gas_only(&mut c2_sub_flat, c2_h, c2_w, LOT_BLOCK_SIZE);
+
+    // Scene analysis from DC grid -> adapt filter strength
+    let scene_profile = scene_analysis::analyze_dc_grid(
+        &l_dc_denorm, l_raw.grid_h, l_raw.grid_w,
+    );
+    eprintln!("  Scene: {:?}, smooth={:.0}%, velvet={:.2}",
+              scene_profile.scene_type, scene_profile.smooth_pct,
+              scene_profile.velvet_strength);
+
+    // All post-processing disabled for maximum PSNR
+    // Deblocking+velvet cost -1.06 dB PSNR, anti-ring neutral
+    // TODO: develop PSNR-positive deblocking (gentler, edge-preserving)
+
+    // Anti-ring sigma on L — disabled: hurts PSNR
+    // dsp::anti_ring_sigma(&mut l_flat, height, width, detail_step);
+
+    // PTF inverse on L
+    {
+        use golden::PTF_GAMMA_INV;
+        let inv255 = 1.0 / 255.0;
+        for v in l_flat.iter_mut() {
+            *v = 255.0 * (*v * inv255).clamp(0.0, 1.0).powf(PTF_GAMMA_INV);
+        }
+    }
+
+    // Upsample chroma (skip if already full resolution)
+    let mut c1_full = if c1_h == height && c1_w == width {
+        c1_sub_flat // already full res
+    } else {
+        color::upsample_420(&c1_sub_flat, c1_h, c1_w, height, width)
+    };
+    let c2_full = if c2_h == height && c2_w == width {
+        c2_sub_flat // already full res (4:4:4 mode)
+    } else {
+        color::upsample_422(&c2_sub_flat, c2_h, c2_w, width)
+    };
+
+    // Point 3: Decode chroma residual
+    if use_chroma_resid && pos < body.len() {
+        let mask_size = read_u32(body, &mut pos) as usize;
+        let c1_mask = body[pos..pos + mask_size].to_vec();
+        pos += mask_size;
+        let resid_size = read_u32(body, &mut pos) as usize;
+        let c1_resid: Vec<i8> = body[pos..pos + resid_size].iter().map(|&b| b as i8).collect();
+        pos += resid_size;
+        let chroma_resid_step = detail_step * calibration::CHROMA_RESIDUAL_STEP_MULT;
+        color::decode_chroma_residual(&mut c1_full, &c1_mask, &c1_resid,
+                                       height, width, chroma_resid_step);
+        eprintln!("    chroma residual decoded: {} blocks active", c1_resid.len() / 64);
+    }
+
+    // GCT inverse -> RGB
+    let n = width * height;
+    let (r_plane, g_plane, b_plane) = color::golden_rotate_inverse(&l_flat, &c1_full, &c2_full, n);
+
+    let mut rgb = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        rgb.push(r_plane[i].round().clamp(0.0, 255.0) as u8);
+        rgb.push(g_plane[i].round().clamp(0.0, 255.0) as u8);
+        rgb.push(b_plane[i].round().clamp(0.0, 255.0) as u8);
+    }
+
+    Ok(DecodedImage { rgb, width, height })
 }

@@ -1,15 +1,16 @@
 [package]
-name = "aurea"
-version = "0.9.0"
+name = "aurea-trashland"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Aurea image codec CLI"
+description = "Satellite signal loss effect using the Aurea codec pipeline"
 
 [[bin]]
-name = "aurea"
+name = "aurea-trashland"
 path = "src/main.rs"
 
 [dependencies]
 aurea-core = { path = "../core" }
-clap = { version = "4", features = ["derive"] }
+ndarray = "0.16"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+clap = { version = "4", features = ["derive"] }

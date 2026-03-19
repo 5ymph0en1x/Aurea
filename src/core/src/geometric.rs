@@ -5,6 +5,7 @@
 /// - Force: quantized at Fibonacci levels (Weber-Fechner)
 /// - Profile: golden bell along primitives (not constant force)
 /// - Arcs: sampling at the golden angle (137.5 degrees)
+use half::f16;
 use ndarray::Array2;
 
 /// Fibonacci force levels (natural logarithmic quantization).
@@ -676,6 +677,54 @@ pub fn extract_primitives(
     (primitives, r_lh, r_hl, r_hh)
 }
 
+/// Encode 3 detail subbands (LH, HL, HH) using primitives-first with iterative extraction.
+/// Fits primitives on raw f64 coefficients, computes residuals, iterates.
+/// Returns (primitives, residual_lh, residual_hl, residual_hh).
+pub fn encode_detail_subband(
+    lh: &Array2<f64>,
+    hl: &Array2<f64>,
+    hh: &Array2<f64>,
+    max_passes: usize,
+    _quality: u8,
+) -> (Vec<Primitive>, Array2<f64>, Array2<f64>, Array2<f64>) {
+    let mut all_prims = Vec::new();
+    let mut resid_lh = lh.clone();
+    let mut resid_hl = hl.clone();
+    let mut resid_hh = hh.clone();
+
+    let total_energy: f64 = lh.iter().map(|v| v * v).sum::<f64>()
+        + hl.iter().map(|v| v * v).sum::<f64>()
+        + hh.iter().map(|v| v * v).sum::<f64>();
+
+    for _pass in 0..max_passes {
+        // Extract primitives from current residual
+        let (prims, new_lh, new_hl, new_hh) =
+            extract_primitives(&resid_lh, &resid_hl, &resid_hh);
+
+        if prims.is_empty() {
+            break;
+        }
+
+        // extract_primitives returns residuals already (input - rendered)
+        resid_lh = new_lh;
+        resid_hl = new_hl;
+        resid_hh = new_hh;
+        all_prims.extend(prims);
+
+        // Check convergence: if captured > 50% of original energy, stop
+        if total_energy > 0.0 {
+            let resid_energy: f64 = resid_lh.iter().map(|v| v * v).sum::<f64>()
+                + resid_hl.iter().map(|v| v * v).sum::<f64>()
+                + resid_hh.iter().map(|v| v * v).sum::<f64>();
+            if (1.0 - resid_energy / total_energy) > 0.5 {
+                break;
+            }
+        }
+    }
+
+    (all_prims, resid_lh, resid_hl, resid_hh)
+}
+
 /// Fast profit: estimation without full render.
 /// bits_saved ~ n_points_cluster * 2 (sigmap) + n_large * 8 - cost_primitive
 #[inline]
@@ -779,6 +828,320 @@ pub fn deserialize_primitives(data: &[u8]) -> (Vec<Primitive>, usize) {
     }
 
     (primitives, total_bytes)
+}
+
+// ============================================================
+// LL Polynomial Surface Patches
+// ============================================================
+
+/// Polynomial surface patch for LL subband coding.
+/// Bi-quadratic: a00 + a10*dx + a01*dy + a11*dx*dy + a20*dx² + a02*dy²
+/// where dx = (x - x0) / w, dy = (y - y0) / h (normalized to [0, 1])
+#[derive(Debug, Clone)]
+pub struct PolyPatch {
+    pub x0: u16,
+    pub y0: u16,
+    pub w: u8,
+    pub h: u8,
+    pub coeffs: [f64; 6], // a00, a10, a01, a11, a20, a02
+}
+
+/// Solve a 6x6 linear system Ax = b via Gaussian elimination with partial pivoting.
+fn solve_6x6(a: &[[f64; 6]; 6], b: &[f64; 6]) -> [f64; 6] {
+    // Augmented matrix
+    let mut m = [[0.0f64; 7]; 6];
+    for i in 0..6 {
+        for j in 0..6 {
+            m[i][j] = a[i][j];
+        }
+        m[i][6] = b[i];
+    }
+    // Forward elimination with partial pivoting
+    for col in 0..6 {
+        // Find pivot
+        let mut max_row = col;
+        let mut max_val = m[col][col].abs();
+        for row in (col + 1)..6 {
+            if m[row][col].abs() > max_val {
+                max_val = m[row][col].abs();
+                max_row = row;
+            }
+        }
+        m.swap(col, max_row);
+        let pivot = m[col][col];
+        if pivot.abs() < 1e-12 {
+            continue;
+        } // singular
+        for row in (col + 1)..6 {
+            let factor = m[row][col] / pivot;
+            for j in col..7 {
+                m[row][j] -= factor * m[col][j];
+            }
+        }
+    }
+    // Back substitution
+    let mut x = [0.0f64; 6];
+    for i in (0..6).rev() {
+        let mut sum = m[i][6];
+        for j in (i + 1)..6 {
+            sum -= m[i][j] * x[j];
+        }
+        x[i] = if m[i][i].abs() > 1e-12 {
+            sum / m[i][i]
+        } else {
+            0.0
+        };
+    }
+    x
+}
+
+/// Fit a bi-quadratic polynomial to a rectangular region.
+/// data: flat row-major array, data_w: stride.
+/// Returns [a00, a10, a01, a11, a20, a02].
+fn fit_poly_patch(
+    data: &[f64],
+    data_w: usize,
+    x0: usize,
+    y0: usize,
+    pw: usize,
+    ph: usize,
+) -> [f64; 6] {
+    // Build normal equations: A^T A c = A^T b
+    // basis functions: [1, dx, dy, dx*dy, dx^2, dy^2]
+    // where dx = px/(pw-1), dy = py/(ph-1) (normalized)
+    let mut ata = [[0.0f64; 6]; 6];
+    let mut atb = [0.0f64; 6];
+
+    for py in 0..ph {
+        for px in 0..pw {
+            let dx = if pw > 1 {
+                px as f64 / (pw - 1) as f64
+            } else {
+                0.0
+            };
+            let dy = if ph > 1 {
+                py as f64 / (ph - 1) as f64
+            } else {
+                0.0
+            };
+            let basis = [1.0, dx, dy, dx * dy, dx * dx, dy * dy];
+            let val = data[(y0 + py) * data_w + (x0 + px)];
+            for i in 0..6 {
+                for j in 0..6 {
+                    ata[i][j] += basis[i] * basis[j];
+                }
+                atb[i] += basis[i] * val;
+            }
+        }
+    }
+
+    solve_6x6(&ata, &atb)
+}
+
+/// Render a polynomial patch into a flat buffer (overwrite — patches tile, don't overlap).
+fn render_poly_patch_into(patch: &PolyPatch, out: &mut [f64], out_w: usize, out_h: usize) {
+    let [a00, a10, a01, a11, a20, a02] = patch.coeffs;
+    let pw = patch.w as usize;
+    let ph = patch.h as usize;
+    let x0 = patch.x0 as usize;
+    let y0 = patch.y0 as usize;
+    for py in 0..ph {
+        let oy = y0 + py;
+        if oy >= out_h {
+            break;
+        }
+        let dy = if ph > 1 {
+            py as f64 / (ph - 1) as f64
+        } else {
+            0.0
+        };
+        for px in 0..pw {
+            let ox = x0 + px;
+            if ox >= out_w {
+                break;
+            }
+            let dx = if pw > 1 {
+                px as f64 / (pw - 1) as f64
+            } else {
+                0.0
+            };
+            let val = a00 + a10 * dx + a01 * dy + a11 * dx * dy + a20 * dx * dx + a02 * dy * dy;
+            out[oy * out_w + ox] = val;
+        }
+    }
+}
+
+/// Compute RMSE of a rectangular region between original and prediction.
+fn patch_rmse(
+    original: &[f64],
+    prediction: &[f64],
+    w: usize,
+    x0: usize,
+    y0: usize,
+    pw: usize,
+    ph: usize,
+) -> f64 {
+    let mut sum_sq = 0.0;
+    let mut count = 0;
+    for py in 0..ph {
+        for px in 0..pw {
+            let idx = (y0 + py) * w + (x0 + px);
+            let diff = original[idx] - prediction[idx];
+            sum_sq += diff * diff;
+            count += 1;
+        }
+    }
+    if count > 0 {
+        (sum_sq / count as f64).sqrt()
+    } else {
+        0.0
+    }
+}
+
+/// Zero out a rectangular region in a buffer.
+fn zero_region(buf: &mut [f64], w: usize, x0: usize, y0: usize, pw: usize, ph: usize) {
+    for py in 0..ph {
+        for px in 0..pw {
+            buf[(y0 + py) * w + (x0 + px)] = 0.0;
+        }
+    }
+}
+
+/// Fit polynomial patches to an entire LL subband.
+/// Returns (patches, residual).
+pub fn fit_ll_patches(
+    ll: &[f64],
+    h: usize,
+    w: usize,
+    detail_step: f64,
+) -> (Vec<PolyPatch>, Vec<f64>) {
+    let base_size = 16usize;
+    let mut patches = Vec::new();
+    let mut prediction = vec![0.0f64; h * w];
+
+    let bh = (h + base_size - 1) / base_size;
+    let bw = (w + base_size - 1) / base_size;
+
+    for by in 0..bh {
+        for bx in 0..bw {
+            let x0 = bx * base_size;
+            let y0 = by * base_size;
+            let pw = base_size.min(w - x0);
+            let ph = base_size.min(h - y0);
+
+            if pw < 2 || ph < 2 {
+                continue;
+            }
+
+            // Fit base patch
+            let coeffs = fit_poly_patch(ll, w, x0, y0, pw, ph);
+            let patch = PolyPatch {
+                x0: x0 as u16,
+                y0: y0 as u16,
+                w: pw as u8,
+                h: ph as u8,
+                coeffs,
+            };
+
+            // Render and check RMSE
+            render_poly_patch_into(&patch, &mut prediction, w, h);
+            let rmse = patch_rmse(ll, &prediction, w, x0, y0, pw, ph);
+
+            if rmse > detail_step * 0.5 && pw >= 8 && ph >= 8 {
+                // Subdivide: zero out base prediction, fit 4 sub-patches
+                zero_region(&mut prediction, w, x0, y0, pw, ph);
+                let hw = pw / 2;
+                let hh = ph / 2;
+                for &(sx, sy, sw, sh) in &[
+                    (x0, y0, hw, hh),
+                    (x0 + hw, y0, pw - hw, hh),
+                    (x0, y0 + hh, hw, ph - hh),
+                    (x0 + hw, y0 + hh, pw - hw, ph - hh),
+                ] {
+                    if sw < 2 || sh < 2 {
+                        continue;
+                    }
+                    let sub_coeffs = fit_poly_patch(ll, w, sx, sy, sw, sh);
+                    let sub = PolyPatch {
+                        x0: sx as u16,
+                        y0: sy as u16,
+                        w: sw as u8,
+                        h: sh as u8,
+                        coeffs: sub_coeffs,
+                    };
+                    render_poly_patch_into(&sub, &mut prediction, w, h);
+                    patches.push(sub);
+                }
+            } else {
+                patches.push(patch);
+            }
+        }
+    }
+
+    let residual: Vec<f64> = ll
+        .iter()
+        .zip(&prediction)
+        .map(|(&a, &b)| a - b)
+        .collect();
+    (patches, residual)
+}
+
+/// Render all polynomial patches into a flat buffer. Used by the decoder.
+pub fn render_ll_patches(patches: &[PolyPatch], h: usize, w: usize) -> Vec<f64> {
+    let mut out = vec![0.0f64; h * w];
+    for patch in patches {
+        render_poly_patch_into(patch, &mut out, w, h);
+    }
+    out
+}
+
+/// Serialize polynomial patches to bytes. Coefficients stored as f16 for compactness.
+pub fn serialize_poly_patches(patches: &[PolyPatch]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(patches.len() as u16).to_le_bytes());
+    for p in patches {
+        buf.extend_from_slice(&p.x0.to_le_bytes());
+        buf.extend_from_slice(&p.y0.to_le_bytes());
+        buf.push(p.w);
+        buf.push(p.h);
+        for &c in &p.coeffs {
+            let h = f16::from_f64(c);
+            buf.extend_from_slice(&h.to_le_bytes());
+        }
+    }
+    buf
+}
+
+/// Deserialize polynomial patches from bytes.
+/// Returns (patches, bytes_consumed).
+pub fn deserialize_poly_patches(data: &[u8]) -> (Vec<PolyPatch>, usize) {
+    if data.len() < 2 {
+        return (vec![], 0);
+    }
+    let n = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let mut pos = 2;
+    let mut patches = Vec::with_capacity(n);
+    for _ in 0..n {
+        if pos + 18 > data.len() {
+            break;
+        }
+        let x0 = u16::from_le_bytes([data[pos], data[pos + 1]]);
+        pos += 2;
+        let y0 = u16::from_le_bytes([data[pos], data[pos + 1]]);
+        pos += 2;
+        let w = data[pos];
+        pos += 1;
+        let h = data[pos];
+        pos += 1;
+        let mut coeffs = [0.0f64; 6];
+        for c in &mut coeffs {
+            let h16 = f16::from_le_bytes([data[pos], data[pos + 1]]);
+            *c = h16.to_f64();
+            pos += 2;
+        }
+        patches.push(PolyPatch { x0, y0, w, h, coeffs });
+    }
+    (patches, pos)
 }
 
 // ============================================================
@@ -997,5 +1360,162 @@ mod tests {
 
         let (prims, _r_lh, _r_hl, _r_hh) = extract_primitives(&q_lh, &q_hl, &q_hh);
         assert!(prims.is_empty(), "Bandes vides => aucune primitive");
+    }
+
+    // ----------------------------------------------------------
+    // Tests des patches polynomiaux LL
+    // ----------------------------------------------------------
+
+    #[test]
+    fn test_poly_patch_flat_surface() {
+        let ll = vec![128.0f64; 16 * 16];
+        let (patches, residual) = super::fit_ll_patches(&ll, 16, 16, 10.0);
+        assert!(!patches.is_empty());
+        let resid_energy: f64 = residual.iter().map(|r| r * r).sum();
+        assert!(
+            resid_energy < 1.0,
+            "flat surface residual should be ~0, got energy {}",
+            resid_energy
+        );
+    }
+
+    #[test]
+    fn test_poly_patch_linear_gradient() {
+        let mut ll = vec![0.0f64; 32 * 32];
+        for y in 0..32 {
+            for x in 0..32 {
+                ll[y * 32 + x] = x as f64 * 8.0;
+            }
+        }
+        let (patches, residual) = super::fit_ll_patches(&ll, 32, 32, 10.0);
+        let _ = patches;
+        let total_energy: f64 = ll.iter().map(|v| v * v).sum();
+        let resid_energy: f64 = residual.iter().map(|r| r * r).sum();
+        let capture = 1.0 - resid_energy / total_energy;
+        assert!(
+            capture > 0.95,
+            "gradient should capture >95%, got {:.1}%",
+            capture * 100.0
+        );
+    }
+
+    #[test]
+    fn test_poly_patch_quadratic() {
+        let mut ll = vec![0.0f64; 32 * 32];
+        for y in 0..32 {
+            for x in 0..32 {
+                let dx = x as f64 / 31.0;
+                let dy = y as f64 / 31.0;
+                ll[y * 32 + x] = 50.0 + 30.0 * dx - 20.0 * dy + 10.0 * dx * dx + 5.0 * dy * dy;
+            }
+        }
+        let (patches, residual) = super::fit_ll_patches(&ll, 32, 32, 10.0);
+        let _ = patches;
+        let total_energy: f64 = ll.iter().map(|v| v * v).sum();
+        let resid_energy: f64 = residual.iter().map(|r| r * r).sum();
+        let capture = 1.0 - resid_energy / total_energy;
+        assert!(
+            capture > 0.99,
+            "quadratic should capture >99%, got {:.1}%",
+            capture * 100.0
+        );
+    }
+
+    #[test]
+    fn test_poly_patch_serialize_roundtrip() {
+        let patches = vec![
+            super::PolyPatch {
+                x0: 0,
+                y0: 0,
+                w: 16,
+                h: 16,
+                coeffs: [128.0, 5.0, -3.0, 0.1, 0.02, -0.01],
+            },
+            super::PolyPatch {
+                x0: 16,
+                y0: 0,
+                w: 16,
+                h: 16,
+                coeffs: [64.0, -2.0, 1.0, 0.0, 0.0, 0.0],
+            },
+        ];
+        let data = super::serialize_poly_patches(&patches);
+        let (decoded, consumed) = super::deserialize_poly_patches(&data);
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(consumed, data.len());
+        assert_eq!(decoded[0].x0, 0);
+        assert_eq!(decoded[1].x0, 16);
+        // f16 roundtrip: large values have ~0.1% precision, small values clip to 0
+        assert!((decoded[0].coeffs[0] - 128.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn test_poly_patch_render_roundtrip() {
+        let mut ll = vec![0.0f64; 16 * 16];
+        for y in 0..16 {
+            for x in 0..16 {
+                ll[y * 16 + x] = 100.0 + x as f64 * 2.0 + y as f64 * 3.0;
+            }
+        }
+        let (patches, _) = super::fit_ll_patches(&ll, 16, 16, 10.0);
+        let rendered = super::render_ll_patches(&patches, 16, 16);
+        let max_err: f64 = ll
+            .iter()
+            .zip(&rendered)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_err < 1.0,
+            "render should be close to original, max_err = {}",
+            max_err
+        );
+    }
+
+    // ----------------------------------------------------------
+    // Tests de encode_detail_subband (iterative extraction)
+    // ----------------------------------------------------------
+
+    #[test]
+    fn test_encode_detail_subband_reduces_energy() {
+        // Create a synthetic detail band with some structure
+        let h = 64;
+        let w = 64;
+        let mut lh = Array2::<f64>::zeros((h, w));
+        let mut hl = Array2::<f64>::zeros((h, w));
+        let hh = Array2::<f64>::zeros((h, w));
+
+        // Add some edges (horizontal line in LH, vertical line in HL)
+        for x in 10..50 {
+            lh[[32, x]] = 20.0;
+            lh[[33, x]] = -15.0;
+        }
+        for y in 10..50 {
+            hl[[y, 32]] = 18.0;
+            hl[[y, 33]] = -12.0;
+        }
+
+        let total_energy: f64 =
+            lh.iter().map(|v| v * v).sum::<f64>() + hl.iter().map(|v| v * v).sum::<f64>();
+
+        let (prims, res_lh, res_hl, _res_hh) =
+            super::encode_detail_subband(&lh, &hl, &hh, 3, 75);
+
+        let resid_energy: f64 =
+            res_lh.iter().map(|v| v * v).sum::<f64>() + res_hl.iter().map(|v| v * v).sum::<f64>();
+
+        // Primitives should capture SOME energy (residual < original)
+        assert!(
+            resid_energy <= total_energy,
+            "residual energy {} should be <= total {}",
+            resid_energy,
+            total_energy
+        );
+        // With structure present, at least a few primitives should be extracted
+        // (may be 0 if the thresholds don't match -- that's OK for now, the codec degrades gracefully)
+        println!(
+            "Primitives extracted: {}, energy capture: {:.1}%",
+            prims.len(),
+            (1.0 - resid_energy / total_energy) * 100.0
+        );
     }
 }

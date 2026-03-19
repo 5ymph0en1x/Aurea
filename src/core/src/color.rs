@@ -171,9 +171,356 @@ pub fn golden_rotate_inverse(l: &[f64], c1: &[f64], c2: &[f64], n: usize) -> (Ve
     (r, g, b)
 }
 
+// ======================================================================
+// 4:2:2 subsampling (horizontal only, for C2 red chroma)
+// ======================================================================
+
+/// 4:2:2 subsampling: average pairs horizontally, keep full vertical resolution.
+/// Returns (channel_sub, h, wc) where wc = (w+1)/2.
+pub fn subsample_422_encode(channel: &[f64], h: usize, w: usize) -> (Vec<f64>, usize, usize) {
+    let wc = (w + 1) / 2;
+    let mut result = vec![0.0f64; h * wc];
+
+    for y in 0..h {
+        for cx in 0..wc {
+            let x0 = cx * 2;
+            let x1 = (x0 + 1).min(w - 1);
+            result[y * wc + cx] = (channel[y * w + x0] + channel[y * w + x1]) / 2.0;
+        }
+    }
+
+    (result, h, wc)
+}
+
+/// Bilinear upsample from 4:2:2 (h, wc) to (h, w) — horizontal only.
+pub fn upsample_422(channel: &[f64], h: usize, wc: usize, target_w: usize) -> Vec<f64> {
+    let mut result = vec![0.0f64; h * target_w];
+    let scale_x = if target_w > 1 { (wc as f64 - 1.0) / (target_w as f64 - 1.0) } else { 0.0 };
+
+    for y in 0..h {
+        for x in 0..target_w {
+            let sx = x as f64 * scale_x;
+            let ix0 = (sx as usize).min(wc.saturating_sub(1));
+            let ix1 = (ix0 + 1).min(wc.saturating_sub(1));
+            let dx = sx - ix0 as f64;
+            result[y * target_w + x] =
+                channel[y * wc + ix0] * (1.0 - dx) + channel[y * wc + ix1] * dx;
+        }
+    }
+
+    result
+}
+
+// ======================================================================
+// Phi-Chroma: saturation map + adaptive chroma factor + chroma residual
+// ======================================================================
+
+/// Compute normalized saturation map from two chroma LL planes.
+/// Returns S_norm in [0, 1] per pixel: 0 = achromatic, 1 = fully saturated.
+/// Both encoder and decoder call this on reconstructed LL data (identical).
+pub fn saturation_map(c1: &[f64], c2: &[f64], h: usize, w: usize) -> Vec<f64> {
+    let n = h * w;
+    let raw: Vec<f64> = (0..n)
+        .map(|i| (c1[i] * c1[i] + c2[i] * c2[i]).sqrt())
+        .collect();
+
+    // 95th percentile (robust normalization)
+    let mut sorted = raw.clone();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let idx_95 = ((n as f64 * 0.95) as usize).min(n.saturating_sub(1));
+    let s_95th = sorted[idx_95].max(1.0); // floor at 1.0 for achromatic images
+
+    raw.iter().map(|&s| (s / s_95th).clamp(0.0, 1.0)).collect()
+}
+
+/// Phi-adaptive chroma factor from normalized saturation.
+/// factor(S) = phi^-2 + (1 - phi^-2) * (1 - S)^2.
+/// Range: [phi^-2, 1.0] = [0.382, 1.0].
+/// Saturated zones get FINER quantization than luma (factor < 1.0).
+/// Desaturated zones get same as luma (factor = 1.0).
+#[inline]
+pub fn phi_chroma_factor(s_norm: f64) -> f64 {
+    use crate::golden::PHI_INV2;
+    PHI_INV2 + (1.0 - PHI_INV2) * (1.0 - s_norm) * (1.0 - s_norm)
+}
+
+/// Perceptual dead zone map: DNA bathtub curve + texture modulation.
+///
+/// The dead zone balances two competing needs:
+/// - At edges/contours in dark/bright zones: SMALL dz (preserve detail)
+/// - In smooth/flat dark zones: LARGE dz (kill structured ±1 noise = Morton diamond grid)
+///
+/// Formula:
+///   sensitivity = cos(pi * L_norm)^2        [bathtub: 1 at extremes, 0 at mid]
+///   texture = local gradient magnitude       [high at edges, low in flat zones]
+///   dz = dz_base * (1 - phi^-1 * sensitivity * texture_norm)
+///
+/// - Dark/bright EDGES: small dz (sensitivity=1, texture=1) → preserves contours
+/// - Dark/bright FLATS: large dz (sensitivity=1, texture=0) → kills Morton diamonds
+/// - Mid-tones: dz = base regardless of texture
+pub fn perceptual_dz_map(luma: &[f64], h: usize, w: usize, base_dz: f64) -> Vec<f64> {
+    use crate::golden::PHI_INV;
+    let n = h * w;
+    if n == 0 { return vec![]; }
+
+    // Robust luminance range
+    let mut sorted: Vec<f64> = luma.iter().copied().collect();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let idx_05 = ((n as f64 * 0.05) as usize).min(n.saturating_sub(1));
+    let idx_95 = ((n as f64 * 0.95) as usize).min(n.saturating_sub(1));
+    let l_min = sorted[idx_05];
+    let l_max = sorted[idx_95].max(l_min + 1.0);
+
+    // Local gradient magnitude (texture detector)
+    let mut grad = vec![0.0f64; n];
+    for y in 0..h {
+        for x in 0..w {
+            let gy = if y + 1 < h {
+                (luma[(y + 1) * w + x] - luma[y * w + x]).abs()
+            } else { 0.0 };
+            let gx = if x + 1 < w {
+                (luma[y * w + x + 1] - luma[y * w + x]).abs()
+            } else { 0.0 };
+            grad[y * w + x] = gy.max(gx);
+        }
+    }
+    // Normalize gradient: 95th percentile
+    let mut g_sorted = grad.clone();
+    g_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let g_95 = g_sorted[((n as f64 * 0.95) as usize).min(n.saturating_sub(1))].max(1.0);
+
+    (0..n).map(|i| {
+        let l_norm = ((luma[i] - l_min) / (l_max - l_min)).clamp(0.0, 1.0);
+        let cos_val = (std::f64::consts::PI * l_norm).cos();
+        let sensitivity = cos_val * cos_val;
+
+        let texture_norm = (grad[i] / g_95).clamp(0.0, 1.0);
+
+        // At edges (texture=1): reduce dz (preserve detail)
+        // At flats (texture=0): keep dz at base (kill noise)
+        base_dz * (1.0 - PHI_INV * sensitivity * texture_norm)
+    }).collect()
+}
+
+/// v9 compensatory dead zone: mid-tones get wider dead zone to offset
+/// Weber-Fechner bpp cost in dark areas. Replaces `perceptual_dz_map`.
+///
+/// The compensator uses sin(pi * L_norm)^2 which peaks at 0.5 (mid-tone)
+/// and is zero at extremes (dark/bright). This widens mid-tone dz by up to 50%,
+/// saving bits where the eye is least sensitive to quantization noise.
+pub fn perceptual_dz_map_v9(luma: &[f64], h: usize, w: usize, base_dz: f64) -> Vec<f64> {
+    use crate::golden::PHI_INV;
+    let n = h * w;
+    if n == 0 { return vec![]; }
+
+    // Robust luminance range
+    let mut sorted: Vec<f64> = luma.iter().copied().collect();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let idx_05 = ((n as f64 * 0.05) as usize).min(n.saturating_sub(1));
+    let idx_95 = ((n as f64 * 0.95) as usize).min(n.saturating_sub(1));
+    let l_min_robust = sorted[idx_05];
+    let l_max_robust = sorted[idx_95];
+    // If dynamic range is narrow (< 32 levels), use absolute [0, 255] normalization
+    // so mid-tones are recognized as mid-tones even in flat patches.
+    let (l_min, l_max) = if (l_max_robust - l_min_robust) < 32.0 {
+        (0.0, 255.0)
+    } else {
+        (l_min_robust, l_max_robust.max(l_min_robust + 1.0))
+    };
+
+    // Local gradient magnitude (texture detector)
+    let mut grad = vec![0.0f64; n];
+    for y in 0..h {
+        for x in 0..w {
+            let gy = if y + 1 < h { (luma[(y + 1) * w + x] - luma[y * w + x]).abs() } else { 0.0 };
+            let gx = if x + 1 < w { (luma[y * w + x + 1] - luma[y * w + x]).abs() } else { 0.0 };
+            grad[y * w + x] = gy.max(gx);
+        }
+    }
+    // Normalize gradient: 95th percentile
+    let mut g_sorted = grad.clone();
+    g_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let g_95 = g_sorted[((n as f64 * 0.95) as usize).min(n.saturating_sub(1))].max(1.0);
+
+    (0..n).map(|i| {
+        let l_norm = ((luma[i] - l_min) / (l_max - l_min)).clamp(0.0, 1.0);
+        let cos_val = (std::f64::consts::PI * l_norm).cos();
+        let sensitivity = cos_val * cos_val;
+        let texture_norm = (grad[i] / g_95).clamp(0.0, 1.0);
+
+        // Compensator: sin^2 peaks at mid-tone (l_norm=0.5), zero at extremes
+        let sin_val = (std::f64::consts::PI * l_norm).sin();
+        let compensator = 1.0 + 0.5 * sin_val * sin_val;
+
+        base_dz * compensator * (1.0 - PHI_INV * sensitivity * texture_norm)
+    }).collect()
+}
+
+/// Bilinear downsample from (src_h, src_w) to (dst_h, dst_w).
+/// Same mapping as upsample_420: in = out * (in_size-1)/(out_size-1).
+pub fn downsample_2d(
+    data: &[f64], src_h: usize, src_w: usize, dst_h: usize, dst_w: usize,
+) -> Vec<f64> {
+    let mut result = vec![0.0f64; dst_h * dst_w];
+    let scale_y = if dst_h > 1 { (src_h as f64 - 1.0) / (dst_h as f64 - 1.0) } else { 0.0 };
+    let scale_x = if dst_w > 1 { (src_w as f64 - 1.0) / (dst_w as f64 - 1.0) } else { 0.0 };
+
+    for y in 0..dst_h {
+        let sy = y as f64 * scale_y;
+        let iy0 = (sy as usize).min(src_h.saturating_sub(1));
+        let iy1 = (iy0 + 1).min(src_h.saturating_sub(1));
+        let dy = sy - iy0 as f64;
+        for x in 0..dst_w {
+            let sx = x as f64 * scale_x;
+            let ix0 = (sx as usize).min(src_w.saturating_sub(1));
+            let ix1 = (ix0 + 1).min(src_w.saturating_sub(1));
+            let dx = sx - ix0 as f64;
+            result[y * dst_w + x] =
+                data[iy0 * src_w + ix0] * (1.0 - dy) * (1.0 - dx)
+              + data[iy0 * src_w + ix1] * (1.0 - dy) * dx
+              + data[iy1 * src_w + ix0] * dy * (1.0 - dx)
+              + data[iy1 * src_w + ix1] * dy * dx;
+        }
+    }
+    result
+}
+
+/// Encode the chroma subsampling residual for one channel.
+///
+/// Computes: residual = original_fullres - upsample(subsampled)
+/// Then masks by block 8x8: only blocks where sat_norm > phi^-1 are kept.
+/// Returns (block_mask, quantized_residuals_for_active_blocks).
+///
+/// block_mask: 1 bit per 8x8 block (row-major, packed into bytes)
+/// residuals: i8 values for active blocks only (row-major within block, blocks in scan order)
+pub fn encode_chroma_residual(
+    original: &[f64],     // full-res channel (H x W)
+    subsampled: &[f64],   // 4:2:0 channel (Hc x Wc)
+    sat_map_full: &[f64], // saturation S_norm at full resolution (H x W)
+    h: usize, w: usize,
+    hc: usize, wc: usize,
+    quant_step: f64,
+) -> (Vec<u8>, Vec<i8>) {
+    use crate::golden::PHI_INV;
+    const BLOCK: usize = 8;
+
+    // Upsample subsampled back to full res
+    let upsampled = upsample_420(subsampled, hc, wc, h, w);
+
+    // Residual = original - upsampled
+    let residual: Vec<f64> = original.iter().zip(&upsampled)
+        .map(|(&o, &u)| o - u)
+        .collect();
+
+    let bh = (h + BLOCK - 1) / BLOCK;
+    let bw = (w + BLOCK - 1) / BLOCK;
+    let n_blocks = bh * bw;
+    let mask_bytes = (n_blocks + 7) / 8;
+    let mut block_mask = vec![0u8; mask_bytes];
+    let mut active_residuals: Vec<i8> = Vec::new();
+
+    for by in 0..bh {
+        for bx in 0..bw {
+            let block_idx = by * bw + bx;
+            let y0 = by * BLOCK;
+            let x0 = bx * BLOCK;
+            let y1 = (y0 + BLOCK).min(h);
+            let x1 = (x0 + BLOCK).min(w);
+
+            // Average saturation in this block
+            let mut sat_sum = 0.0;
+            let mut count = 0;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    sat_sum += sat_map_full[y * w + x];
+                    count += 1;
+                }
+            }
+            let sat_avg = sat_sum / count.max(1) as f64;
+
+            // Only activate block if saturation > phi^-1
+            if sat_avg > PHI_INV {
+                block_mask[block_idx / 8] |= 1 << (block_idx % 8);
+
+                // Quantize and store residuals for this block
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let r = residual[y * w + x];
+                        let q = (r / quant_step).round().clamp(-127.0, 127.0) as i8;
+                        active_residuals.push(q);
+                    }
+                }
+            }
+        }
+    }
+
+    (block_mask, active_residuals)
+}
+
+/// Decode the chroma residual and add it to the upsampled chroma.
+/// Modifies chroma_full in-place.
+pub fn decode_chroma_residual(
+    chroma_full: &mut [f64],  // upsampled chroma (H x W), modified in-place
+    block_mask: &[u8],
+    residuals: &[i8],
+    h: usize, w: usize,
+    quant_step: f64,
+) {
+    const BLOCK: usize = 8;
+    let bh = (h + BLOCK - 1) / BLOCK;
+    let bw = (w + BLOCK - 1) / BLOCK;
+    let mut res_idx = 0;
+
+    for by in 0..bh {
+        for bx in 0..bw {
+            let block_idx = by * bw + bx;
+            let active = (block_mask[block_idx / 8] >> (block_idx % 8)) & 1 != 0;
+
+            if active {
+                let y0 = by * BLOCK;
+                let x0 = bx * BLOCK;
+                let y1 = (y0 + BLOCK).min(h);
+                let x1 = (x0 + BLOCK).min(w);
+
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        if res_idx < residuals.len() {
+                            chroma_full[y * w + x] += residuals[res_idx] as f64 * quant_step;
+                            res_idx += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_phi_chroma_factor() {
+        use crate::golden::PHI_INV2;
+        // phi_chroma_factor(0.0) = PHI_INV2 + (1-PHI_INV2)*1 = 1.0 (desaturated → same as luma)
+        let f0 = phi_chroma_factor(0.0);
+        assert!((f0 - 1.0).abs() < 1e-10, "f(0) should be 1.0, got {}", f0);
+        // phi_chroma_factor(1.0) = PHI_INV2 = 0.382 (fully saturated → finest chroma quant)
+        let f1 = phi_chroma_factor(1.0);
+        assert!((f1 - PHI_INV2).abs() < 1e-10, "f(1) should be phi^-2, got {}", f1);
+        // Monotone decreasing
+        for i in 0..100 {
+            assert!(phi_chroma_factor(i as f64 / 100.0) >= phi_chroma_factor((i + 1) as f64 / 100.0));
+        }
+    }
+
+    #[test]
+    fn test_saturation_map_grey() {
+        let c1 = vec![0.1, 0.2, 0.0, 0.1];
+        let c2 = vec![0.0, 0.1, 0.1, 0.0];
+        let sat = saturation_map(&c1, &c2, 2, 2);
+        for &s in &sat { assert!(s < 0.3); }
+    }
 
     #[test]
     fn test_ycbcr_white() {
@@ -219,5 +566,22 @@ mod tests {
         assert_eq!(up.len(), 16);
         // Corners should be close to source values
         assert!((up[0] - 10.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_perceptual_dz_map_v9_midtone_wider() {
+        let luma = vec![128.0; 64]; // 8x8 flat mid-tone
+        let dz = perceptual_dz_map_v9(&luma, 8, 8, 0.15);
+        let avg: f64 = dz.iter().sum::<f64>() / dz.len() as f64;
+        // Mid-tone flat: compensator=1.5, sensitivity=0, so dz = 0.15 * 1.5 = 0.225
+        assert!(avg > 0.20 && avg < 0.25, "mid-tone dz should be ~0.225, got {}", avg);
+    }
+
+    #[test]
+    fn test_perceptual_dz_map_v9_dark_unchanged() {
+        let luma = vec![10.0; 64]; // 8x8 flat dark
+        let dz = perceptual_dz_map_v9(&luma, 8, 8, 0.15);
+        let avg: f64 = dz.iter().sum::<f64>() / dz.len() as f64;
+        assert!(avg > 0.12 && avg < 0.18, "dark dz should be ~0.15, got {}", avg);
     }
 }

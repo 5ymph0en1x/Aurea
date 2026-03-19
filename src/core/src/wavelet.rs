@@ -4,7 +4,6 @@
 //! Used in v6 pipeline: multi-level decomposition on Y/Cb/Cr channels.
 
 use ndarray::{Array2, s};
-use rayon::prelude::*;
 
 // CDF 9/7 lifting coefficients
 const ALPHA: f64 = -1.58613434205992;
@@ -214,7 +213,71 @@ pub fn wavelet_recompose(
 }
 
 /// Dead zone factor: effective threshold = (0.5 + DEAD_ZONE) * step
-pub const DEAD_ZONE: f64 = 0.15;
+pub const DEAD_ZONE: f64 = 0.22;
+
+/// Weber-Fechner luminance-adaptive factor for v9.
+/// Dark pixels (L=0) get finer quantization (factor=0.5),
+/// bright pixels (L=1) get base quantization (factor=1.0).
+#[inline]
+pub fn weber_factor(l_norm: f64) -> f64 {
+    use crate::golden::PHI_INV2;
+    let raw = l_norm.powf(0.4) * (1.0 - PHI_INV2) + PHI_INV2;
+    raw.clamp(0.5, 1.0)
+}
+
+/// Sidelobe suppression: zero out small coefficients adjacent to large ones.
+/// CDF 9/7 creates oscillating sidelobes (support ~4px) around edges.
+/// After quantization these become structured "golf ball" artifacts.
+/// Suppressing them BEFORE quantization eliminates the pattern.
+pub fn suppress_sidelobes(band: &mut Array2<f64>, step: f64) {
+    let h = band.nrows();
+    let w = band.ncols();
+    if h < 5 || w < 5 { return; }
+
+    const RADIUS: usize = 3;         // tight: first sidelobe lobe only
+    const SMALL_THRESH: f64 = 0.4;   // only the very smallest
+    const LARGE_THRESH: f64 = 3.0;   // only near very strong edges
+
+    let small_abs = SMALL_THRESH * step;
+    let large_abs = LARGE_THRESH * step;
+
+    // First pass: find large coefficients (edges)
+    let mut is_large = vec![false; h * w];
+    for i in 0..h {
+        for j in 0..w {
+            if band[[i, j]].abs() > large_abs {
+                is_large[i * w + j] = true;
+            }
+        }
+    }
+
+    // Dilate the large mask by RADIUS (any pixel within RADIUS of a large coeff)
+    let mut near_large = vec![false; h * w];
+    for i in 0..h {
+        for j in 0..w {
+            if !is_large[i * w + j] { continue; }
+            let i_lo = i.saturating_sub(RADIUS);
+            let i_hi = (i + RADIUS).min(h - 1);
+            let j_lo = j.saturating_sub(RADIUS);
+            let j_hi = (j + RADIUS).min(w - 1);
+            for ii in i_lo..=i_hi {
+                for jj in j_lo..=j_hi {
+                    near_large[ii * w + jj] = true;
+                }
+            }
+        }
+    }
+
+    // Second pass: zero small coefficients that are near large ones (sidelobes)
+    for i in 0..h {
+        for j in 0..w {
+            let idx = i * w + j;
+            if near_large[idx] && !is_large[idx] && band[[i, j]].abs() < small_abs {
+                band[[i, j]] = 0.0;
+            }
+        }
+    }
+}
 
 /// Quantize a detail band with dead zone: sign(x) * max(0, floor(|x|/step + 0.5 - dz))
 pub fn quantize_band(band: &Array2<f64>, step: f64) -> Array2<f64> {
@@ -225,148 +288,211 @@ pub fn quantize_band(band: &Array2<f64>, step: f64) -> Array2<f64> {
     })
 }
 
+/// Quantize with a per-pixel step map (same dead-zone formula).
+pub fn quantize_band_map(band: &Array2<f64>, step_map: &[f64]) -> Array2<f64> {
+    let h = band.nrows();
+    let w = band.ncols();
+    let mut q = Array2::<f64>::zeros((h, w));
+    for i in 0..h {
+        for j in 0..w {
+            let v = band[[i, j]];
+            let s = step_map[i * w + j];
+            let sign = if v >= 0.0 { 1.0 } else { -1.0 };
+            let qv = (v.abs() / s + 0.5 - DEAD_ZONE).floor();
+            q[[i, j]] = if qv > 0.0 { sign * qv } else { 0.0 };
+        }
+    }
+    q
+}
+
+/// Quantize with per-pixel step map AND per-pixel dead zone (Weber-Fechner).
+/// dz_map[i] in [0, 0.15]: dark regions get smaller dead zone -> more coefficients survive.
+pub fn quantize_band_weber(band: &Array2<f64>, step_map: &[f64], dz_map: &[f64]) -> Array2<f64> {
+    let h = band.nrows();
+    let w = band.ncols();
+    let mut q = Array2::<f64>::zeros((h, w));
+    for i in 0..h {
+        for j in 0..w {
+            let v = band[[i, j]];
+            let idx = i * w + j;
+            let s = step_map[idx];
+            let dz = dz_map[idx];
+            let sign = if v >= 0.0 { 1.0 } else { -1.0 };
+            let qv = (v.abs() / s + 0.5 - dz).floor();
+            q[[i, j]] = if qv > 0.0 { sign * qv } else { 0.0 };
+        }
+    }
+    q
+}
+
+/// Sigma-delta noise-shaped quantization (telecom/ADC technique).
+/// Feeds back quantization error to the next coefficient, converting
+/// structured banding (low-freq error) into invisible high-freq noise.
+/// Encoder-only: the decoder just dequantizes normally.
+pub fn quantize_band_noise_shaped(band: &Array2<f64>, step: f64) -> Array2<f64> {
+    let h = band.nrows();
+    let w = band.ncols();
+    let mut q = Array2::<f64>::zeros((h, w));
+    const FEEDBACK: f64 = 0.7;
+
+    for i in 0..h {
+        let mut err = 0.0;
+        for j in 0..w {
+            // Inject previous error into current coefficient
+            let c = band[[i, j]] + FEEDBACK * err;
+            let sign = if c >= 0.0 { 1.0 } else { -1.0 };
+            let qv = (c.abs() / step + 0.5 - DEAD_ZONE).floor();
+            let quantized = if qv > 0.0 { sign * qv } else { 0.0 };
+            q[[i, j]] = quantized;
+            // Error = what we wanted minus what we got
+            err = band[[i, j]] - quantized * step;
+        }
+    }
+    q
+}
+
 /// Dequantize: multiply by step
 pub fn dequantize_band(qband: &Array2<f64>, step: f64) -> Array2<f64> {
     qband.mapv(|v| v * step)
 }
 
-/// Entropy threshold: zero out ±1 coefficients in low-density regions.
-/// density_cutoff: fraction of non-zero neighbors below which ±1 are zeroed.
-pub fn entropy_threshold(q: &Array2<f64>, block_size: usize, density_cutoff: f64) -> Array2<f64> {
-    let h = q.nrows();
-    let w = q.ncols();
-    let mut result = q.clone();
+/// Compute a per-pixel dead zone map from a luminance reference (downsampled L).
+/// Dark pixels get near-zero dead zone (preserve detail), bright pixels get wider.
+/// `l_ref` must have exactly `band_h * band_w` elements, values in [0, 255].
+pub fn luminance_dz_map(l_ref: &[f64], band_h: usize, band_w: usize) -> Vec<f64> {
+    let n = band_h * band_w;
+    // Robust normalization (5th / 95th percentile)
+    let mut sorted: Vec<f64> = l_ref.iter().copied().collect();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let idx_05 = ((n as f64 * 0.05) as usize).min(n.saturating_sub(1));
+    let idx_95 = ((n as f64 * 0.95) as usize).min(n.saturating_sub(1));
+    let l_min = sorted[idx_05];
+    let l_max = sorted[idx_95].max(l_min + 1.0);
 
-    // Compute local density of non-zero coefficients
-    let half = block_size / 2;
+    const DZ_DARK: f64 = 0.02;  // near-zero: preserve dark detail
+    const DZ_BRIGHT: f64 = 0.25; // wider than default 0.15: save bits in brights
+
+    l_ref.iter().map(|&v| {
+        let l_norm = ((v - l_min) / (l_max - l_min)).clamp(0.0, 1.0);
+        DZ_DARK + (DZ_BRIGHT - DZ_DARK) * l_norm.sqrt()
+    }).collect()
+}
+
+/// Dequantize with a per-pixel step map.
+pub fn dequantize_band_map(qband: &Array2<f64>, step_map: &[f64]) -> Array2<f64> {
+    let h = qband.nrows();
+    let w = qband.ncols();
+    let mut out = Array2::<f64>::zeros((h, w));
     for i in 0..h {
         for j in 0..w {
-            if result[[i, j]].abs() != 1.0 {
-                continue;
-            }
-            // Count non-zero in block
-            let i0 = i.saturating_sub(half);
-            let i1 = (i + half + 1).min(h);
-            let j0 = j.saturating_sub(half);
-            let j1 = (j + half + 1).min(w);
-            let mut nz = 0usize;
-            let mut total = 0usize;
-            for ii in i0..i1 {
-                for jj in j0..j1 {
-                    total += 1;
-                    if q[[ii, jj]] != 0.0 {
-                        nz += 1;
-                    }
-                }
-            }
-            let density = nz as f64 / total as f64;
-            if density < density_cutoff {
-                result[[i, j]] = 0.0;
-            }
+            out[[i, j]] = qband[[i, j]] * step_map[i * w + j];
         }
     }
-
-    result
+    out
 }
 
-/// Encode a detail band: quantize + entropy threshold + significance map packing.
-/// Returns (encoded_bytes, dequantized_band).
-pub fn encode_detail_band(band: &Array2<f64>, step: f64) -> (Vec<u8>, Array2<f64>) {
-    let q = quantize_band(band, step);
-    let q = entropy_threshold(&q, 8, 0.10);
+/// Build a block AQ map from the L channel (PTF space).
+/// Each 32x32 block stores its mean luminance as u8.
+/// Returns (map, blocks_h, blocks_w).
+pub const AQ_BLOCK: usize = 32;
 
-    let h = q.nrows();
-    let w = q.ncols();
-    let n = h * w;
-    let flat: Vec<i16> = q.iter().map(|&v| v as i16).collect();
+pub fn build_block_aq_map(l_ch: &[f64], h: usize, w: usize) -> (Vec<u8>, usize, usize) {
+    let bh = (h + AQ_BLOCK - 1) / AQ_BLOCK;
+    let bw = (w + AQ_BLOCK - 1) / AQ_BLOCK;
+    let mut map = Vec::with_capacity(bh * bw);
 
-    let mut stream = Vec::new();
-
-    // Significance map: pack as bits (8 coeffs per byte, little-endian bit order)
-    let n_sig_bytes = (n + 7) / 8;
-    let mut sig_packed = vec![0u8; n_sig_bytes];
-    for i in 0..n {
-        if flat[i] != 0 {
-            sig_packed[i / 8] |= 1 << (i % 8);
+    for by in 0..bh {
+        for bx in 0..bw {
+            let y0 = by * AQ_BLOCK;
+            let x0 = bx * AQ_BLOCK;
+            let y1 = (y0 + AQ_BLOCK).min(h);
+            let x1 = (x0 + AQ_BLOCK).min(w);
+            let mut sum = 0.0;
+            let mut count = 0u32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    sum += l_ch[y * w + x];
+                    count += 1;
+                }
+            }
+            let mean = sum / count.max(1) as f64;
+            map.push(mean.clamp(0.0, 255.0) as u8);
         }
     }
-    stream.extend_from_slice(&sig_packed);
-
-    // Non-zero values only
-    let nz_vals: Vec<i16> = flat.iter().copied().filter(|&v| v != 0).collect();
-    let n_nz = nz_vals.len() as u32;
-    stream.extend_from_slice(&n_nz.to_le_bytes());
-
-    if !nz_vals.is_empty() {
-        let max_abs = nz_vals.iter().map(|v| v.abs()).max().unwrap_or(0);
-        if max_abs <= 127 {
-            stream.push(0x08);
-            for &v in &nz_vals {
-                stream.push(v as i8 as u8);
-            }
-        } else {
-            stream.push(0x10);
-            for &v in &nz_vals {
-                stream.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-    }
-
-    let deq = dequantize_band(&q, step);
-    (stream, deq)
+    (map, bh, bw)
 }
 
-/// Decode a detail band from byte stream.
-/// Returns (band as f64, new position).
-pub fn decode_detail_band(stream: &[u8], pos: usize, h: usize, w: usize) -> (Array2<f64>, usize) {
-    let n = h * w;
-    let n_sig_bytes = (n + 7) / 8;
-    let mut p = pos;
+/// Convert a block AQ map entry (mean luminance u8) to a step factor.
+/// Weber-Fechner: factor = (L / 128)^0.5, clamped [0.25, 4.0].
+/// Dark blocks get finer step, bright blocks get coarser step.
+#[inline]
+pub fn aq_block_factor(lum: u8) -> f64 {
+    let ratio = lum.max(1) as f64 / 128.0;
+    ratio.sqrt().clamp(0.25, 4.0)
+}
 
-    // Unpack significance map
-    let sig_packed = &stream[p..p + n_sig_bytes];
-    p += n_sig_bytes;
+/// Build a per-pixel step map for a detail subband from the block AQ map.
+/// The subband at level `lv` has dimensions (band_h, band_w).
+/// The block map covers the full image at 32x32 granularity.
+/// Level 0 subbands are ~half image size, level 1 ~quarter, etc.
+pub fn aq_step_map_for_band(
+    aq_map: &[u8], map_bh: usize, map_bw: usize,
+    band_h: usize, band_w: usize,
+    img_h: usize, img_w: usize,
+    base_step: f64,
+) -> Vec<f64> {
+    let mut step_map = Vec::with_capacity(band_h * band_w);
+    // Spatial scale: band pixel (i,j) corresponds to image pixel (i*sy, j*sx)
+    let sy = if band_h > 1 { (img_h - 1) as f64 / (band_h - 1) as f64 } else { 0.0 };
+    let sx = if band_w > 1 { (img_w - 1) as f64 / (band_w - 1) as f64 } else { 0.0 };
 
-    let mut sig = vec![false; n];
-    for i in 0..n {
-        sig[i] = (sig_packed[i / 8] >> (i % 8)) & 1 != 0;
-    }
-
-    // Number of non-zero values
-    let n_nz = u32::from_le_bytes([stream[p], stream[p + 1], stream[p + 2], stream[p + 3]]) as usize;
-    p += 4;
-
-    let mut flat = vec![0.0f64; n];
-
-    if n_nz > 0 {
-        let marker = stream[p];
-        p += 1;
-
-        let mut nz_idx = 0;
-        if marker == 0x08 {
-            // int8
-            for i in 0..n {
-                if sig[i] {
-                    flat[i] = stream[p + nz_idx] as i8 as f64;
-                    nz_idx += 1;
-                }
-            }
-            p += n_nz;
-        } else {
-            // int16
-            for i in 0..n {
-                if sig[i] {
-                    let v = i16::from_le_bytes([stream[p + nz_idx * 2], stream[p + nz_idx * 2 + 1]]);
-                    flat[i] = v as f64;
-                    nz_idx += 1;
-                }
-            }
-            p += n_nz * 2;
+    for i in 0..band_h {
+        for j in 0..band_w {
+            let img_y = (i as f64 * sy) as usize;
+            let img_x = (j as f64 * sx) as usize;
+            let by = (img_y / AQ_BLOCK).min(map_bh.saturating_sub(1));
+            let bx = (img_x / AQ_BLOCK).min(map_bw.saturating_sub(1));
+            let lum = aq_map[by * map_bw + bx];
+            step_map.push(base_step * aq_block_factor(lum));
         }
     }
+    step_map
+}
 
-    let band = Array2::from_shape_vec((h, w), flat).unwrap();
-    (band, p)
+/// Codon-adaptive step map: 4-zone tRNA table.
+/// Maps local luminance from decoded LL to a step multiplier.
+/// Dark regions get finer quantization (Weber-Fechner).
+pub fn codon_step_map(
+    ll_decoded: &[f64], ll_h: usize, ll_w: usize,
+    band_h: usize, band_w: usize,
+    _img_h: usize, _img_w: usize,
+    base_step: f64,
+) -> Vec<f64> {
+    use crate::calibration;
+    let trna = calibration::CODON_TRNA;
+    let thresholds = calibration::CODON_LUM_THRESHOLDS;
+
+    let mut step_map = Vec::with_capacity(band_h * band_w);
+    let sy = if band_h > 1 { (ll_h as f64 - 1.0) / (band_h as f64 - 1.0) } else { 0.0 };
+    let sx = if band_w > 1 { (ll_w as f64 - 1.0) / (band_w as f64 - 1.0) } else { 0.0 };
+
+    for i in 0..band_h {
+        for j in 0..band_w {
+            let ll_y = (i as f64 * sy).round() as usize;
+            let ll_x = (j as f64 * sx).round() as usize;
+            let ll_y = ll_y.min(ll_h.saturating_sub(1));
+            let ll_x = ll_x.min(ll_w.saturating_sub(1));
+            let lum = ll_decoded[ll_y * ll_w + ll_x];
+
+            let zone = if lum < thresholds[0] { 0 }
+                       else if lum < thresholds[1] { 1 }
+                       else if lum < thresholds[2] { 2 }
+                       else { 3 };
+
+            step_map.push(base_step * trna[zone]);
+        }
+    }
+    step_map
 }
 
 /// Chroma detail factor (v6+: 2.0x coarser than Y)
@@ -374,6 +500,9 @@ pub const CHROMA_DETAIL_FACTOR: f64 = 1.5;
 
 /// Perceptual band weights (QGA-optimized)
 pub const PERCEPTUAL_BAND_WEIGHTS: [f64; 3] = [1.3, 0.65, 1.3]; // LH, HL, HH
+
+/// v9: symmetric LH/HL to eliminate horizontal banding asymmetry.
+pub const PERCEPTUAL_BAND_WEIGHTS_V9: [f64; 3] = [1.0, 1.0, 1.3];
 
 /// Level scales (degressive: deeper levels quantized more finely)
 pub const LEVEL_SCALES: [f64; 4] = [1.0, 0.9, 0.5, 0.3];
@@ -437,6 +566,16 @@ pub fn auto_wv_levels(h: usize, w: usize) -> usize {
     else { 3 }
 }
 
+/// v10: deeper wavelet decomposition for primitives-first pipeline.
+pub fn auto_wv_levels_v10(h: usize, w: usize) -> usize {
+    let min_dim = h.min(w);
+    if min_dim < 64 { 1 }
+    else if min_dim < 256 { 2 }
+    else if min_dim < 1024 { 3 }
+    else if min_dim < 4096 { 4 }
+    else { 5 }
+}
+
 /// Zigzag diagonal scan order for an (h, w) grid.
 /// Returns a permutation vector: zigzag[k] = raster index of the k-th element.
 pub fn zigzag_order(h: usize, w: usize) -> Vec<usize> {
@@ -479,718 +618,9 @@ pub fn zigzag_inverse(h: usize, w: usize) -> Vec<usize> {
     inv
 }
 
-/// Smooth block mask for adaptive quantization.
-/// Returns (bh, bw, mask) where mask[b] = true if the block is smooth.
-pub fn block_smooth_mask(band: &Array2<f64>, bs: usize) -> (usize, usize, Vec<bool>) {
-    let h = band.nrows();
-    let w = band.ncols();
-    let bh = (h + bs - 1) / bs;
-    let bw = (w + bs - 1) / bs;
 
-    // Per-block energy
-    let mut energies = Vec::with_capacity(bh * bw);
-    for bi in 0..bh {
-        for bj in 0..bw {
-            let i0 = bi * bs;
-            let i1 = (i0 + bs).min(h);
-            let j0 = bj * bs;
-            let j1 = (j0 + bs).min(w);
-            let mut sum = 0.0f64;
-            let mut count = 0usize;
-            for i in i0..i1 {
-                for j in j0..j1 {
-                    sum += band[[i, j]].abs();
-                    count += 1;
-                }
-            }
-            energies.push(sum / count.max(1) as f64);
-        }
-    }
 
-    // Threshold = median / 2
-    let mut sorted_e = energies.clone();
-    sorted_e.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median = sorted_e[sorted_e.len() / 2];
-    let threshold = median / 2.0;
 
-    let mask: Vec<bool> = energies.iter().map(|&e| e < threshold).collect();
-    (bh, bw, mask)
-}
-
-/// Build a per-pixel step map from the smooth block mask.
-/// smooth blocks: base_step * 1.5, normal blocks: base_step.
-pub fn build_step_map(h: usize, w: usize, bh: usize, bw: usize,
-                       mask: &[bool], base_step: f64, bs: usize) -> Vec<f64> {
-    let mut step_map = vec![base_step; h * w];
-    for bi in 0..bh {
-        for bj in 0..bw {
-            if mask[bi * bw + bj] {
-                let i0 = bi * bs;
-                let i1 = (i0 + bs).min(h);
-                let j0 = bj * bs;
-                let j1 = (j0 + bs).min(w);
-                for i in i0..i1 {
-                    for j in j0..j1 {
-                        step_map[i * w + j] = base_step * 1.5;
-                    }
-                }
-            }
-        }
-    }
-    step_map
-}
-
-/// Encode a detail band with zigzag + adaptive quantization.
-/// Returns (encoded_bytes, dequantized_band).
-pub fn encode_detail_band_v2(
-    band: &Array2<f64>, base_step: f64, flags: u8,
-) -> (Vec<u8>, Array2<f64>) {
-    encode_detail_band_v2_with_dz(band, base_step, flags, None)
-}
-
-/// Encode with gas-first reordering (Minesweeper).
-/// If `gas_mask` is provided (raster order, true=gas/parent_zero),
-/// gas pixels are grouped at the head of the Morton stream,
-/// followed by solid pixels. LZMA compresses long zero sequences better.
-/// Quantization identical to v2 -> zero quality loss.
-pub fn encode_detail_band_v2_gas(
-    band: &Array2<f64>, base_step: f64, flags: u8,
-    gas_mask: Option<&[bool]>,
-) -> (Vec<u8>, Array2<f64>) {
-    // Without gas mask, encode normally
-    if gas_mask.is_none() || flags & FLAG_MORTON_2BIT == 0 {
-        return encode_detail_band_v2(band, base_step, flags);
-    }
-    let gas = gas_mask.unwrap();
-
-    let h = band.nrows();
-    let w = band.ncols();
-    let n = h * w;
-    let bs = 16usize;
-
-    // Quantization (identical to v2 -- no DZ modification)
-    let (bh, bw, smooth_mask) = if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        block_smooth_mask(band, bs)
-    } else {
-        (0, 0, vec![])
-    };
-
-    let q: Array2<f64>;
-    let deq: Array2<f64>;
-
-    if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        let step_map = build_step_map(h, w, bh, bw, &smooth_mask, base_step, bs);
-        let mut q_arr = Array2::<f64>::zeros((h, w));
-        let mut deq_arr = Array2::<f64>::zeros((h, w));
-        for i in 0..h {
-            for j in 0..w {
-                let s = step_map[i * w + j];
-                let v = band[[i, j]];
-                let sign = if v >= 0.0 { 1.0 } else { -1.0 };
-                let qv_raw = (v.abs() / s + 0.5 - DEAD_ZONE).floor();
-                let qv = if qv_raw > 0.0 { sign * qv_raw } else { 0.0 };
-                q_arr[[i, j]] = qv;
-                deq_arr[[i, j]] = qv * s;
-            }
-        }
-        q = entropy_threshold(&q_arr, 8, 0.10);
-        let mut d2 = Array2::<f64>::zeros((h, w));
-        for i in 0..h {
-            for j in 0..w {
-                d2[[i, j]] = q[[i, j]] * step_map[i * w + j];
-            }
-        }
-        deq = d2;
-    } else {
-        let q0 = quantize_band(band, base_step);
-        q = entropy_threshold(&q0, 8, 0.10);
-        deq = dequantize_band(&q, base_step);
-    };
-
-    let flat: Vec<i16> = q.iter().map(|&v| v as i16).collect();
-
-    // Morton order → puis gas-first reordering
-    let morton = morton_order(h, w);
-    // Separer les indices Morton en gas et solid
-    let mut gas_indices = Vec::new();
-    let mut solid_indices = Vec::new();
-    for &mi in &morton {
-        if gas[mi] {
-            gas_indices.push(mi);
-        } else {
-            solid_indices.push(mi);
-        }
-    }
-    let n_gas = gas_indices.len() as u32;
-
-    // Build flat_ordered: gas first, solid second
-    let mut flat_ordered = Vec::with_capacity(n);
-    for &idx in &gas_indices {
-        flat_ordered.push(flat[idx]);
-    }
-    for &idx in &solid_indices {
-        flat_ordered.push(flat[idx]);
-    }
-
-    let mut stream = Vec::new();
-
-    // Gas-split header: store n_gas so the decoder knows the cutoff point
-    stream.extend_from_slice(&n_gas.to_le_bytes());
-
-    // Adaptive quant mask header
-    if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        stream.extend_from_slice(&(bh as u16).to_le_bytes());
-        stream.extend_from_slice(&(bw as u16).to_le_bytes());
-        let n_mask_bytes = (bh * bw + 7) / 8;
-        let mut mask_packed = vec![0u8; n_mask_bytes];
-        for i in 0..(bh * bw) {
-            if smooth_mask[i] {
-                mask_packed[i / 8] |= 1 << (i % 8);
-            }
-        }
-        stream.extend_from_slice(&mask_packed);
-    }
-
-    // 2-bit sigmap encoding (gas-first order)
-    let n_2bit_bytes = (n + 3) / 4;
-    let mut packed_2bit = vec![0u8; n_2bit_bytes];
-    for i in 0..n {
-        let code: u8 = match flat_ordered[i] {
-            0 => 0,
-            1 => 1,
-            -1 => 2,
-            _ => 3,
-        };
-        packed_2bit[i / 4] |= code << ((i % 4) * 2);
-    }
-    stream.extend_from_slice(&packed_2bit);
-
-    // Remaining values: |val| >= 2 (gas-first order)
-    let rest: Vec<i16> = flat_ordered.iter().copied()
-        .filter(|&v| v != 0 && v != 1 && v != -1).collect();
-    let n_rest = rest.len() as u32;
-    stream.extend_from_slice(&n_rest.to_le_bytes());
-
-    if !rest.is_empty() {
-        let max_abs = rest.iter().map(|v| v.abs()).max().unwrap_or(0);
-        if max_abs <= 127 {
-            stream.push(0x08);
-            for &v in &rest {
-                stream.push(v as i8 as u8);
-            }
-        } else {
-            stream.push(0x10);
-            for &v in &rest {
-                stream.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-    }
-
-    (stream, deq)
-}
-
-/// Encode with spatially variable dead zone (gas/solid prediction).
-/// If `dz_map` is provided, each pixel uses its own dead zone
-/// instead of the DEAD_ZONE constant.
-pub fn encode_detail_band_v2_with_dz(
-    band: &Array2<f64>, base_step: f64, flags: u8,
-    dz_map: Option<&[f64]>,
-) -> (Vec<u8>, Array2<f64>) {
-    let h = band.nrows();
-    let w = band.ncols();
-    let n = h * w;
-    let bs = 16usize;
-
-    // Adaptive quantization: smooth block mask
-    let (bh, bw, smooth_mask) = if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        block_smooth_mask(band, bs)
-    } else {
-        (0, 0, vec![])
-    };
-
-    // Quantization (uniform or adaptive)
-    let q: Array2<f64>;
-    let deq: Array2<f64>;
-
-    if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        let step_map = build_step_map(h, w, bh, bw, &smooth_mask, base_step, bs);
-        let mut q_arr = Array2::<f64>::zeros((h, w));
-        let mut deq_arr = Array2::<f64>::zeros((h, w));
-        for i in 0..h {
-            for j in 0..w {
-                let s = step_map[i * w + j];
-                let v = band[[i, j]];
-                let dz = if let Some(dm) = dz_map { dm[i * w + j] } else { DEAD_ZONE };
-                let sign = if v >= 0.0 { 1.0 } else { -1.0 };
-                let qv_raw = (v.abs() / s + 0.5 - dz).floor();
-                let qv = if qv_raw > 0.0 { sign * qv_raw } else { 0.0 };
-                q_arr[[i, j]] = qv;
-                deq_arr[[i, j]] = qv * s;
-            }
-        }
-        // Entropy threshold
-        q = entropy_threshold(&q_arr, 8, 0.10);
-        // Recompute deq after threshold
-        let mut d2 = Array2::<f64>::zeros((h, w));
-        for i in 0..h {
-            for j in 0..w {
-                d2[[i, j]] = q[[i, j]] * step_map[i * w + j];
-            }
-        }
-        deq = d2;
-    } else if let Some(dm) = dz_map {
-        // Spatially variable dead zone without adaptive quant
-        let mut q_arr = Array2::<f64>::zeros((h, w));
-        let mut deq_arr = Array2::<f64>::zeros((h, w));
-        for i in 0..h {
-            for j in 0..w {
-                let v = band[[i, j]];
-                let dz = dm[i * w + j];
-                let sign = if v >= 0.0 { 1.0 } else { -1.0 };
-                let qv_raw = (v.abs() / base_step + 0.5 - dz).floor();
-                let qv = if qv_raw > 0.0 { sign * qv_raw } else { 0.0 };
-                q_arr[[i, j]] = qv;
-                deq_arr[[i, j]] = qv * base_step;
-            }
-        }
-        q = entropy_threshold(&q_arr, 8, 0.10);
-        deq = dequantize_band(&q, base_step);
-    } else {
-        let q0 = quantize_band(band, base_step);
-        q = entropy_threshold(&q0, 8, 0.10);
-        deq = dequantize_band(&q, base_step);
-    };
-
-    let flat: Vec<i16> = q.iter().map(|&v| v as i16).collect();
-
-    // Scan reorder: Morton (priority) or Zigzag
-    let flat_ordered: Vec<i16> = if flags & FLAG_MORTON_2BIT != 0 {
-        let order = morton_order(h, w);
-        order.iter().map(|&idx| flat[idx]).collect()
-    } else if flags & FLAG_ZIGZAG != 0 {
-        let zz = zigzag_order(h, w);
-        zz.iter().map(|&idx| flat[idx]).collect()
-    } else {
-        flat
-    };
-
-    let mut stream = Vec::new();
-
-    // Adaptive quant mask header (u16 LE for Python compatibility)
-    if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        stream.extend_from_slice(&(bh as u16).to_le_bytes());
-        stream.extend_from_slice(&(bw as u16).to_le_bytes());
-        let n_mask_bytes = (bh * bw + 7) / 8;
-        let mut mask_packed = vec![0u8; n_mask_bytes];
-        for i in 0..(bh * bw) {
-            if smooth_mask[i] {
-                mask_packed[i / 8] |= 1 << (i % 8);
-            }
-        }
-        stream.extend_from_slice(&mask_packed);
-    }
-
-    if flags & FLAG_MORTON_2BIT != 0 {
-        // Encodage 2-bit sigmap : 0=zero, 1=+1, 2=-1, 3=other
-        let n_2bit_bytes = (n + 3) / 4;
-        let mut packed_2bit = vec![0u8; n_2bit_bytes];
-        for i in 0..n {
-            let code: u8 = match flat_ordered[i] {
-                0 => 0,
-                1 => 1,
-                -1 => 2,
-                _ => 3,
-            };
-            packed_2bit[i / 4] |= code << ((i % 4) * 2);
-        }
-        stream.extend_from_slice(&packed_2bit);
-
-        // Remaining values: |val| >= 2
-        let rest: Vec<i16> = flat_ordered.iter().copied()
-            .filter(|&v| v != 0 && v != 1 && v != -1).collect();
-        let n_rest = rest.len() as u32;
-        stream.extend_from_slice(&n_rest.to_le_bytes());
-
-        if !rest.is_empty() {
-            let max_abs = rest.iter().map(|v| v.abs()).max().unwrap_or(0);
-            if max_abs <= 127 {
-                stream.push(0x08);
-                for &v in &rest {
-                    stream.push(v as i8 as u8);
-                }
-            } else {
-                stream.push(0x10);
-                for &v in &rest {
-                    stream.extend_from_slice(&v.to_le_bytes());
-                }
-            }
-        }
-    } else {
-        // Format classique: sigmap + NZ values
-        let n_sig_bytes = (n + 7) / 8;
-        let mut sig_packed = vec![0u8; n_sig_bytes];
-        for i in 0..n {
-            if flat_ordered[i] != 0 {
-                sig_packed[i / 8] |= 1 << (i % 8);
-            }
-        }
-        stream.extend_from_slice(&sig_packed);
-
-        let nz_vals: Vec<i16> = flat_ordered.iter().copied().filter(|&v| v != 0).collect();
-        let n_nz = nz_vals.len() as u32;
-        stream.extend_from_slice(&n_nz.to_le_bytes());
-
-        if !nz_vals.is_empty() {
-            let max_abs = nz_vals.iter().map(|v| v.abs()).max().unwrap_or(0);
-            if max_abs <= 127 {
-                stream.push(0x08);
-                for &v in &nz_vals {
-                    stream.push(v as i8 as u8);
-                }
-            } else {
-                stream.push(0x10);
-                for &v in &nz_vals {
-                    stream.extend_from_slice(&v.to_le_bytes());
-                }
-            }
-        }
-    }
-
-    (stream, deq)
-}
-
-/// Decode a v2 detail band (zigzag + adaptive quant).
-/// Returns (dequantized_band, new_position).
-pub fn decode_detail_band_v2(
-    stream: &[u8], pos: usize, h: usize, w: usize,
-    base_step: f64, flags: u8,
-) -> (Array2<f64>, usize) {
-    let n = h * w;
-    let bs = 16usize;
-    let mut p = pos;
-
-    // Adaptive quant mask
-    let smooth_mask: Vec<bool>;
-    let bh: usize;
-    let bw: usize;
-
-    if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        bh = u16::from_le_bytes([stream[p], stream[p + 1]]) as usize; p += 2;
-        bw = u16::from_le_bytes([stream[p], stream[p + 1]]) as usize; p += 2;
-        let n_mask_bytes = (bh * bw + 7) / 8;
-        let mask_packed = &stream[p..p + n_mask_bytes];
-        p += n_mask_bytes;
-        smooth_mask = (0..(bh * bw)).map(|i| {
-            (mask_packed[i / 8] >> (i % 8)) & 1 != 0
-        }).collect();
-    } else {
-        bh = 0; bw = 0;
-        smooth_mask = vec![];
-    }
-
-    let flat: Vec<f64> = if flags & FLAG_MORTON_2BIT != 0 {
-        // 2-bit sigmap decoding: 0=zero, 1=+1, 2=-1, 3=read rest
-        let n_2bit_bytes = (n + 3) / 4;
-        let packed_2bit = &stream[p..p + n_2bit_bytes];
-        p += n_2bit_bytes;
-
-        let mut flat_morton = vec![0.0f64; n];
-        for i in 0..n {
-            let code = (packed_2bit[i / 4] >> ((i % 4) * 2)) & 0x03;
-            match code {
-                1 => flat_morton[i] = 1.0,
-                2 => flat_morton[i] = -1.0,
-                _ => {} // 0 (zero) et 3 (rest) traites apres
-            }
-        }
-
-        // Remaining values (|val| >= 2)
-        let n_rest = u32::from_le_bytes([stream[p], stream[p+1], stream[p+2], stream[p+3]]) as usize;
-        p += 4;
-
-        if n_rest > 0 {
-            let marker = stream[p]; p += 1;
-            let mut rest_idx = 0;
-            for i in 0..n {
-                let code = (packed_2bit[i / 4] >> ((i % 4) * 2)) & 0x03;
-                if code == 3 {
-                    if marker == 0x08 {
-                        flat_morton[i] = stream[p + rest_idx] as i8 as f64;
-                        rest_idx += 1;
-                    } else {
-                        let v = i16::from_le_bytes([stream[p + rest_idx*2], stream[p + rest_idx*2 + 1]]);
-                        flat_morton[i] = v as f64;
-                        rest_idx += 1;
-                    }
-                }
-            }
-            if marker == 0x08 { p += n_rest; } else { p += n_rest * 2; }
-        }
-
-        // Inverse Morton order
-        let inv = morton_inverse(h, w);
-        let mut flat_raster = vec![0.0f64; n];
-        for i in 0..n {
-            flat_raster[i] = flat_morton[inv[i]];
-        }
-        flat_raster
-    } else {
-        // Format classique: sigmap + NZ values
-        let n_sig_bytes = (n + 7) / 8;
-        let sig_packed = &stream[p..p + n_sig_bytes];
-        p += n_sig_bytes;
-
-        let mut sig = vec![false; n];
-        for i in 0..n {
-            sig[i] = (sig_packed[i / 8] >> (i % 8)) & 1 != 0;
-        }
-
-        let n_nz = u32::from_le_bytes([stream[p], stream[p+1], stream[p+2], stream[p+3]]) as usize;
-        p += 4;
-
-        let mut flat_ordered = vec![0.0f64; n];
-
-        if n_nz > 0 {
-            let marker = stream[p]; p += 1;
-            let mut nz_idx = 0;
-            if marker == 0x08 {
-                for i in 0..n {
-                    if sig[i] {
-                        flat_ordered[i] = stream[p + nz_idx] as i8 as f64;
-                        nz_idx += 1;
-                    }
-                }
-                p += n_nz;
-            } else {
-                for i in 0..n {
-                    if sig[i] {
-                        let v = i16::from_le_bytes([stream[p + nz_idx*2], stream[p + nz_idx*2 + 1]]);
-                        flat_ordered[i] = v as f64;
-                        nz_idx += 1;
-                    }
-                }
-                p += n_nz * 2;
-            }
-        }
-
-        // Inverse zigzag
-        if flags & FLAG_ZIGZAG != 0 {
-            let zz = zigzag_order(h, w);
-            let mut out = vec![0.0f64; n];
-            for k in 0..n {
-                out[zz[k]] = flat_ordered[k];
-            }
-            out
-        } else {
-            flat_ordered
-        }
-    };
-
-    // Dequantize
-    let mut band = if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        let step_map = build_step_map(h, w, bh, bw, &smooth_mask, base_step, bs);
-        let mut arr = Array2::<f64>::zeros((h, w));
-        for i in 0..h {
-            for j in 0..w {
-                arr[[i, j]] = flat[i * w + j] * step_map[i * w + j];
-            }
-        }
-        arr
-    } else {
-        let arr_q = Array2::from_shape_vec((h, w), flat).unwrap();
-        dequantize_band(&arr_q, base_step)
-    };
-
-    // Spectral Spin : raffinement median decoder-only
-    {
-        let band_slice = band.as_slice_mut().unwrap();
-        spectral_spin(band_slice, h, w, base_step);
-    }
-
-    (band, p)
-}
-
-/// Decode a band encoded with gas-first reordering.
-/// `gas_mask` (raster order, true=gas) allows reconstructing the original order.
-/// If gas_mask is None, delegates to the standard decoder.
-pub fn decode_detail_band_v2_gas(
-    stream: &[u8], pos: usize, h: usize, w: usize,
-    base_step: f64, flags: u8,
-    gas_mask: Option<&[bool]>,
-) -> (Array2<f64>, usize) {
-    // Without gas mask or without Morton, standard decoding
-    if gas_mask.is_none() || flags & FLAG_MORTON_2BIT == 0 {
-        return decode_detail_band_v2(stream, pos, h, w, base_step, flags);
-    }
-    let gas = gas_mask.unwrap();
-
-    let n = h * w;
-    let bs = 16usize;
-    let mut p = pos;
-
-    // Read n_gas header
-    let n_gas = u32::from_le_bytes([stream[p], stream[p+1], stream[p+2], stream[p+3]]) as usize;
-    p += 4;
-
-    // Adaptive quant mask
-    let smooth_mask: Vec<bool>;
-    let bh: usize;
-    let bw: usize;
-    if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        bh = u16::from_le_bytes([stream[p], stream[p + 1]]) as usize; p += 2;
-        bw = u16::from_le_bytes([stream[p], stream[p + 1]]) as usize; p += 2;
-        let n_mask_bytes = (bh * bw + 7) / 8;
-        let mask_packed = &stream[p..p + n_mask_bytes];
-        p += n_mask_bytes;
-        smooth_mask = (0..(bh * bw)).map(|i| {
-            (mask_packed[i / 8] >> (i % 8)) & 1 != 0
-        }).collect();
-    } else {
-        bh = 0; bw = 0;
-        smooth_mask = vec![];
-    }
-
-    // Decode the 2-bit sigmap (in gas-first order)
-    let n_2bit_bytes = (n + 3) / 4;
-    let packed_2bit = &stream[p..p + n_2bit_bytes];
-    p += n_2bit_bytes;
-
-    let mut flat_gasfirst = vec![0.0f64; n];
-    for i in 0..n {
-        let code = (packed_2bit[i / 4] >> ((i % 4) * 2)) & 0x03;
-        match code {
-            1 => flat_gasfirst[i] = 1.0,
-            2 => flat_gasfirst[i] = -1.0,
-            _ => {}
-        }
-    }
-
-    // Remaining values
-    let n_rest = u32::from_le_bytes([stream[p], stream[p+1], stream[p+2], stream[p+3]]) as usize;
-    p += 4;
-
-    if n_rest > 0 {
-        let marker = stream[p]; p += 1;
-        let mut rest_idx = 0;
-        for i in 0..n {
-            let code = (packed_2bit[i / 4] >> ((i % 4) * 2)) & 0x03;
-            if code == 3 {
-                if marker == 0x08 {
-                    flat_gasfirst[i] = stream[p + rest_idx] as i8 as f64;
-                    rest_idx += 1;
-                } else {
-                    let v = i16::from_le_bytes([stream[p + rest_idx*2], stream[p + rest_idx*2 + 1]]);
-                    flat_gasfirst[i] = v as f64;
-                    rest_idx += 1;
-                }
-            }
-        }
-        if marker == 0x08 { p += n_rest; } else { p += n_rest * 2; }
-    }
-
-    // Reconstruct original Morton order from gas-first order
-    // Same logic as the encoder: compute gas_indices and solid_indices in Morton order
-    let morton = morton_order(h, w);
-    let mut gas_indices = Vec::with_capacity(n_gas);
-    let mut solid_indices = Vec::with_capacity(n - n_gas);
-    for &mi in &morton {
-        if gas[mi] {
-            gas_indices.push(mi);
-        } else {
-            solid_indices.push(mi);
-        }
-    }
-
-    // flat_gasfirst[0..n_gas] = gas values, flat_gasfirst[n_gas..] = solid values
-    // Place in raster order
-    let mut flat_raster = vec![0.0f64; n];
-    for (gi, &raster_idx) in gas_indices.iter().enumerate() {
-        flat_raster[raster_idx] = flat_gasfirst[gi];
-    }
-    for (si, &raster_idx) in solid_indices.iter().enumerate() {
-        flat_raster[raster_idx] = flat_gasfirst[n_gas + si];
-    }
-
-    // Dequantize
-    let mut band = if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        let step_map = build_step_map(h, w, bh, bw, &smooth_mask, base_step, bs);
-        let mut arr = Array2::<f64>::zeros((h, w));
-        for i in 0..h {
-            for j in 0..w {
-                arr[[i, j]] = flat_raster[i * w + j] * step_map[i * w + j];
-            }
-        }
-        arr
-    } else {
-        let arr_q = Array2::from_shape_vec((h, w), flat_raster).unwrap();
-        dequantize_band(&arr_q, base_step)
-    };
-
-    // Spectral Spin
-    {
-        let band_slice = band.as_slice_mut().unwrap();
-        spectral_spin(band_slice, h, w, base_step);
-    }
-
-    (band, p)
-}
-
-// ======================================================================
-// Spectral Spin: median refinement of wavelet coefficients
-// ======================================================================
-
-/// Index with boundary reflection (scipy 'reflect' mode).
-#[inline]
-fn reflect(i: i32, n: i32) -> usize {
-    if i < 0 {
-        (-i).min(n - 1) as usize
-    } else if i >= n {
-        (2 * (n - 1) - i).max(0) as usize
-    } else {
-        i as usize
-    }
-}
-
-/// 5x5 median filter with boundary reflection, parallelized per row.
-fn median_filter_5x5(plane: &[f64], h: usize, w: usize) -> Vec<f64> {
-    let hi = h as i32;
-    let wi = w as i32;
-    let mut result = vec![0.0f64; h * w];
-
-    result.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        let iy = y as i32;
-        let mut buf = [0.0f64; 25];
-        for x in 0..w {
-            let ix = x as i32;
-            let mut k = 0;
-            for dy in -2..=2i32 {
-                let ry = reflect(iy + dy, hi);
-                for dx in -2..=2i32 {
-                    let rx = reflect(ix + dx, wi);
-                    buf[k] = plane[ry * w + rx];
-                    k += 1;
-                }
-            }
-            buf.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-            row[x] = buf[12]; // median de 25 elements
-        }
-    });
-
-    result
-}
-
-/// Spectral spin: local median regularization of wavelet coefficients.
-/// Analogous to Fibonacci spin for LL flats:
-/// the 5x5 median exploits spatial correlation to predict the position
-/// of each coefficient within its quantization bin.
-/// Formula: band * 0.92 + median_5x5 * 0.08
-pub fn spectral_spin(band: &mut [f64], h: usize, w: usize, _step: f64) {
-    let med = median_filter_5x5(band, h, w);
-    let n = h * w;
-    for i in 0..n {
-        band[i] = band[i] * 0.92 + med[i] * 0.08;
-    }
-}
 
 /// Simple bilinear upsample for inter-scale prediction.
 pub fn upsample_band(band: &Array2<f64>, target_h: usize, target_w: usize) -> Array2<f64> {
@@ -1394,342 +824,24 @@ mod tests {
             .fold(0.0f64, f64::max);
         assert!(max_diff < 1e-8, "max_diff = {}", max_diff);
     }
+
+    #[test]
+    fn test_weber_factor() {
+        let f0 = super::weber_factor(0.0);
+        assert!((f0 - 0.5).abs() < 1e-10, "dark: clamped to 0.5, got {}", f0);
+        let f05 = super::weber_factor(0.5);
+        let phi_inv2 = crate::golden::PHI_INV2;
+        let expected = 0.5f64.powf(0.4) * (1.0 - phi_inv2) + phi_inv2;
+        assert!((f05 - expected).abs() < 1e-6, "mid: got {}", f05);
+        let f1 = super::weber_factor(1.0);
+        assert!((f1 - 1.0).abs() < 1e-10, "bright: got {}", f1);
+        // Monotone increasing
+        for i in 0..100 {
+            let a = i as f64 / 100.0;
+            let b = (i + 1) as f64 / 100.0;
+            assert!(super::weber_factor(b) >= super::weber_factor(a), "not monotone at {}", a);
+        }
+    }
 }
 
 
-// ======================================================================
-// ADN coding: enumerative combinatorial by blocks (AUREA v5)
-// ======================================================================
-
-pub const FLAG_ADN: u8 = 0x20;
-const ADN_BLOCK_SIZE: usize = 64;
-const ADN_FORMAT_MARKER: u8 = 0xAD;
-const ADN_EMPTY_THRESHOLD: f64 = 0.30;
-
-use std::sync::LazyLock;
-use crate::zeckendorf::{BitWriter, BitReader};
-
-/// Pascal's triangle C(n,k) for n=0..64, k=0..64.
-static PASCAL: LazyLock<[[u64; 65]; 65]> = LazyLock::new(|| {
-    let mut p = [[0u64; 65]; 65];
-    for n in 0..65 {
-        p[n][0] = 1;
-        for k in 1..=n {
-            p[n][k] = p[n - 1][k - 1].saturating_add(p[n - 1][k]);
-        }
-    }
-    p
-});
-
-/// Number of bits for combinatorial rank C(b, k).
-#[inline]
-fn rank_bits(k: usize, b: usize) -> usize {
-    if k == 0 || k >= b { return 0; }
-    let total = PASCAL[b][k];
-    if total <= 1 { return 0; }
-    64 - (total - 1).leading_zeros() as usize
-}
-
-/// Combinadic rank (sorted ascending positions).
-fn comb_rank(positions: &[usize], _b: usize) -> u64 {
-    let p = &*PASCAL;
-    let mut rank: u64 = 0;
-    for (i, &pos) in positions.iter().enumerate() {
-        if pos >= i + 1 {
-            rank += p[pos][i + 1];
-        }
-    }
-    rank
-}
-
-/// Inverse of combinadic rank.
-fn comb_unrank(mut rank: u64, k: usize, b: usize) -> Vec<usize> {
-    let p = &*PASCAL;
-    let mut positions = Vec::with_capacity(k);
-    for i in (0..k).rev() {
-        let mut c = i;
-        while c + 1 < b && p[c + 1][i + 1] <= rank {
-            c += 1;
-        }
-        positions.push(c);
-        rank -= p[c][i + 1];
-    }
-    positions.reverse();
-    positions
-}
-
-/// Quantize a band and reorder in Morton (shared code).
-fn quantize_and_reorder(
-    band: &Array2<f64>, base_step: f64, flags: u8,
-) -> (Vec<i16>, Array2<f64>, usize, usize, Vec<bool>) {
-    let h = band.nrows();
-    let w = band.ncols();
-    let bs = 16usize;
-
-    let (bh, bw, smooth_mask) = if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        block_smooth_mask(band, bs)
-    } else {
-        (0, 0, vec![])
-    };
-
-    if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        let step_map = build_step_map(h, w, bh, bw, &smooth_mask, base_step, bs);
-        let mut q_arr = Array2::<f64>::zeros((h, w));
-        let mut deq_arr = Array2::<f64>::zeros((h, w));
-        for i in 0..h {
-            for j in 0..w {
-                let s = step_map[i * w + j];
-                let v = band[[i, j]];
-                let sign = if v >= 0.0 { 1.0 } else { -1.0 };
-                let qv_raw = (v.abs() / s + 0.5 - DEAD_ZONE).floor();
-                let qv = if qv_raw > 0.0 { sign * qv_raw } else { 0.0 };
-                q_arr[[i, j]] = qv;
-                deq_arr[[i, j]] = qv * s;
-            }
-        }
-        let q2 = entropy_threshold(&q_arr, 8, 0.10);
-        let mut d2 = Array2::<f64>::zeros((h, w));
-        for i in 0..h {
-            for j in 0..w {
-                d2[[i, j]] = q2[[i, j]] * step_map[i * w + j];
-            }
-        }
-        let flat: Vec<i16> = q2.iter().map(|&v| v as i16).collect();
-        let order = morton_order(h, w);
-        let flat_ordered = order.iter().map(|&idx| flat[idx]).collect();
-        (flat_ordered, d2, bh, bw, smooth_mask)
-    } else {
-        let q0 = quantize_band(band, base_step);
-        let q2 = entropy_threshold(&q0, 8, 0.10);
-        let deq2 = dequantize_band(&q2, base_step);
-        let flat: Vec<i16> = q2.iter().map(|&v| v as i16).collect();
-        let order = morton_order(h, w);
-        let flat_ordered = order.iter().map(|&idx| flat[idx]).collect();
-        (flat_ordered, deq2, bh, bw, smooth_mask)
-    }
-}
-
-/// Encode a detail band with ADN enumerative coding.
-/// Adaptive: if > 30% of blocks are empty, uses ADN; otherwise fallback to v2.
-pub fn encode_detail_band_adn(
-    band: &Array2<f64>, base_step: f64, flags: u8, _is_chroma: bool,
-) -> (Vec<u8>, Array2<f64>) {
-    let h = band.nrows();
-    let w = band.ncols();
-    let n = h * w;
-
-    let (flat_ordered, deq, bh, bw, smooth_mask) =
-        quantize_and_reorder(band, base_step, flags);
-
-    // Count empty blocks for adaptive decision
-    let n_blocks = (n + ADN_BLOCK_SIZE - 1) / ADN_BLOCK_SIZE;
-    let n_empty: usize = (0..n_blocks).filter(|&b| {
-        let start = b * ADN_BLOCK_SIZE;
-        let end = (start + ADN_BLOCK_SIZE).min(n);
-        flat_ordered[start..end].iter().all(|&v| v == 0)
-    }).count();
-
-    if (n_empty as f64) < ADN_EMPTY_THRESHOLD * n_blocks as f64 {
-        // Dense band -> fallback sigmap v2, prefixed by 0x00 marker
-        let (mut v2_data, v2_deq) = encode_detail_band_v2(band, base_step, flags & !FLAG_ADN);
-        let mut prefixed = Vec::with_capacity(1 + v2_data.len());
-        prefixed.push(0x00); // marqueur legacy
-        prefixed.append(&mut v2_data);
-        return (prefixed, v2_deq);
-    }
-
-    // --- ADN encoding ---
-    let mut stream = Vec::new();
-    stream.push(ADN_FORMAT_MARKER);
-
-    // Header adaptive quant
-    if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        stream.extend_from_slice(&(bh as u16).to_le_bytes());
-        stream.extend_from_slice(&(bw as u16).to_le_bytes());
-        let n_mask_bytes = (bh * bw + 7) / 8;
-        let mut mask_packed = vec![0u8; n_mask_bytes];
-        for i in 0..(bh * bw) {
-            if smooth_mask[i] {
-                mask_packed[i / 8] |= 1 << (i % 8);
-            }
-        }
-        stream.extend_from_slice(&mask_packed);
-    }
-
-    stream.extend_from_slice(&(n_blocks as u16).to_le_bytes());
-
-    // Bit-pack the blocks
-    let mut bw_out = BitWriter::new();
-    let mut rest_vals: Vec<i16> = Vec::new();
-
-    for b in 0..n_blocks {
-        let start = b * ADN_BLOCK_SIZE;
-        let end = (start + ADN_BLOCK_SIZE).min(n);
-        let block = &flat_ordered[start..end];
-        let block_b = end - start;
-
-        let nz_pos: Vec<usize> = block.iter().enumerate()
-            .filter(|(_, v)| **v != 0)
-            .map(|(i, _)| i)
-            .collect();
-        let k = nz_pos.len();
-
-        if k == 0 {
-            bw_out.write_bit(true); // vide
-        } else {
-            bw_out.write_bit(false);
-            bw_out.write_bits(k as u64, 6);
-
-            let nbits = rank_bits(k, block_b);
-            if nbits > 0 {
-                let rank = comb_rank(&nz_pos, block_b);
-                bw_out.write_bits(rank, nbits);
-            }
-
-            for &pos in &nz_pos {
-                let v = block[pos];
-                let is_pm1 = v.abs() == 1;
-                bw_out.write_bit(is_pm1);
-                bw_out.write_bit(v < 0);
-                if !is_pm1 {
-                    rest_vals.push(v);
-                }
-            }
-        }
-    }
-
-    let bit_data = bw_out.finish();
-    stream.extend_from_slice(&bit_data);
-
-    // Remaining values raw
-    let n_rest = rest_vals.len() as u32;
-    stream.extend_from_slice(&n_rest.to_le_bytes());
-    if !rest_vals.is_empty() {
-        let max_abs = rest_vals.iter().map(|v| v.abs()).max().unwrap_or(0);
-        if max_abs <= 127 {
-            stream.push(0x08);
-            for &v in &rest_vals { stream.push(v as i8 as u8); }
-        } else {
-            stream.push(0x10);
-            for &v in &rest_vals { stream.extend_from_slice(&v.to_le_bytes()); }
-        }
-    }
-
-    (stream, deq)
-}
-
-/// Decode an ADN band (or legacy fallback).
-pub fn decode_detail_band_adn(
-    stream: &[u8], pos: usize, h: usize, w: usize,
-    base_step: f64, flags: u8, _is_chroma: bool,
-) -> (Array2<f64>, usize) {
-    let n = h * w;
-    let bs = 16usize;
-    let mut p = pos;
-
-    let marker = stream[p]; p += 1;
-    if marker != ADN_FORMAT_MARKER {
-        // Fallback v2
-        return decode_detail_band_v2(stream, p, h, w, base_step, flags & !FLAG_ADN);
-    }
-
-    // Adaptive quant mask
-    let smooth_mask: Vec<bool>;
-    let aq_bh: usize;
-    let aq_bw: usize;
-    if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        aq_bh = u16::from_le_bytes([stream[p], stream[p + 1]]) as usize; p += 2;
-        aq_bw = u16::from_le_bytes([stream[p], stream[p + 1]]) as usize; p += 2;
-        let n_mask_bytes = (aq_bh * aq_bw + 7) / 8;
-        let mask_packed = &stream[p..p + n_mask_bytes];
-        p += n_mask_bytes;
-        smooth_mask = (0..(aq_bh * aq_bw)).map(|i| {
-            (mask_packed[i / 8] >> (i % 8)) & 1 != 0
-        }).collect();
-    } else {
-        aq_bh = 0; aq_bw = 0;
-        smooth_mask = vec![];
-    }
-
-    let n_blocks = u16::from_le_bytes([stream[p], stream[p + 1]]) as usize; p += 2;
-
-    // Read bit-packed blocks
-    let mut reader = BitReader::new(&stream[p..]);
-    let mut flat_morton = vec![0i16; n];
-    let mut rest_positions: Vec<usize> = Vec::new();
-
-    for b in 0..n_blocks {
-        let start = b * ADN_BLOCK_SIZE;
-        let end = (start + ADN_BLOCK_SIZE).min(n);
-        let block_b = end - start;
-
-        let is_empty = reader.read_bit().unwrap_or(true);
-        if is_empty { continue; }
-
-        let k = reader.read_bits(6).unwrap_or(0) as usize;
-        let nbits = rank_bits(k, block_b);
-        let rank = if nbits > 0 { reader.read_bits(nbits).unwrap_or(0) } else { 0 };
-        let positions = comb_unrank(rank, k, block_b);
-
-        for &lpos in &positions {
-            let gpos = start + lpos;
-            let is_pm1 = reader.read_bit().unwrap_or(true);
-            let negative = reader.read_bit().unwrap_or(false);
-
-            if is_pm1 {
-                flat_morton[gpos] = if negative { -1 } else { 1 };
-            } else {
-                rest_positions.push(gpos);
-            }
-        }
-    }
-
-    // Advance p
-    p += (reader.bit_position() + 7) / 8;
-
-    // Remaining values
-    let n_rest = u32::from_le_bytes([stream[p], stream[p+1], stream[p+2], stream[p+3]]) as usize;
-    p += 4;
-    if n_rest > 0 {
-        let rest_marker = stream[p]; p += 1;
-        for (ri, &gpos) in rest_positions.iter().enumerate() {
-            if ri >= n_rest { break; }
-            flat_morton[gpos] = if rest_marker == 0x08 {
-                stream[p + ri] as i8 as i16
-            } else {
-                i16::from_le_bytes([stream[p + ri * 2], stream[p + ri * 2 + 1]])
-            };
-        }
-        if rest_marker == 0x08 { p += n_rest; } else { p += n_rest * 2; }
-    }
-
-    // Morton inverse → raster
-    let inv = morton_inverse(h, w);
-    let mut flat_raster = vec![0.0f64; n];
-    for i in 0..n {
-        flat_raster[i] = flat_morton[inv[i]] as f64;
-    }
-
-    // Dequantize
-    let mut band_out = if flags & FLAG_ADAPTIVE_QUANT != 0 {
-        let step_map = build_step_map(h, w, aq_bh, aq_bw, &smooth_mask, base_step, bs);
-        let mut arr = Array2::<f64>::zeros((h, w));
-        for i in 0..h {
-            for j in 0..w {
-                arr[[i, j]] = flat_raster[i * w + j] * step_map[i * w + j];
-            }
-        }
-        arr
-    } else {
-        let arr_q = Array2::from_shape_vec((h, w), flat_raster).unwrap();
-        dequantize_band(&arr_q, base_step)
-    };
-
-    // Spectral Spin
-    {
-        let s = band_out.as_slice_mut().unwrap();
-        spectral_spin(s, h, w, base_step);
-    }
-
-    (band_out, p)
-}
