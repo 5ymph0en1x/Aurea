@@ -626,7 +626,7 @@ pub fn lot_stride(block_size: usize, use_overlap: bool) -> usize {
 }
 
 // ======================================================================
-// Weber-Fechner luminance tRNA (ADN5)
+// Weber-Fechner luminance tRNA (DNA5)
 // ======================================================================
 
 /// Luminance-adaptive step factor based on Weber-Fechner law.

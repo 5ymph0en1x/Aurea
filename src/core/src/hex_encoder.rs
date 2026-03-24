@@ -1,4 +1,4 @@
-//! Perimeter DCT-II encoder for ADN5 hexagonal codec.
+//! Perimeter DCT-II encoder for DNA5 hexagonal codec.
 //!
 //! Samples the perimeter of each hexagon (~28 pixels), transforms it with
 //! a DCT-II to get ~N/2 real coefficients, and classifies each vertex as
@@ -75,7 +75,7 @@ const FIB_AMPS: [u8; 8] = [0, 1, 2, 3, 5, 8, 13, 21];
 // VertexCodon
 // ---------------------------------------------------------------------------
 
-/// Classification of a hex vertex for ADN5 encoding.
+/// Classification of a hex vertex for DNA5 encoding.
 ///
 /// - `Rien`    (0): flat region, no significant gradient
 /// - `Segment` (1): dominant edge in one direction

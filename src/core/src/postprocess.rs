@@ -69,7 +69,8 @@ pub fn apply_cas_sharpening(
     height: usize,
     sharpness: f32,
 ) -> Vec<f32> {
-    let mut output = vec![0.0; width * height];
+    // Initialize output as a copy of input — border pixels pass through unchanged.
+    let mut output = input.to_vec();
 
     // Standard CAS weight typically varies around -0.125
     let sharp_weight = -0.125 * sharpness.clamp(0.0, 1.0);

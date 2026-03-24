@@ -1,4 +1,4 @@
-//! Hexagonal grid geometry for ADN5 honeycomb tessellation.
+//! Hexagonal grid geometry for DNA5 honeycomb tessellation.
 //!
 //! Flat-top hexagons with radius R=5 (Fibonacci number), providing
 //! the coordinate system, pixel-to-hex mapping, and precomputed hex shape.
@@ -554,7 +554,7 @@ impl MultiScaleHexGrid {
 }
 
 // ---------------------------------------------------------------------------
-// Hexagonal subdivision (fracturing) for ADN5
+// Hexagonal subdivision (fracturing) for DNA5
 // ---------------------------------------------------------------------------
 
 /// Subdivision code for a hexagon (2 bits).

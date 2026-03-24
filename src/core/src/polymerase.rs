@@ -1,4 +1,4 @@
-/// A.D.N. module — Geometric sequencing by polymerase.
+/// D.N.A. module — Geometric sequencing by polymerase.
 /// Replaces PCA/Taubin primitive detection with a codon-guided traversal.
 
 use ndarray::Array2;

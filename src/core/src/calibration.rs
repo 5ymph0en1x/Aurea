@@ -100,7 +100,7 @@ pub const VARIABLE_BLOCK_MERGE_FACTOR: f64 = 0.25;
 pub const VARIABLE_BLOCK_MIN_PCT: f64 = 10.0;
 
 // ======================================================================
-// Quality-adaptive parameters (ADN4)
+// Quality-adaptive parameters (DNA4)
 // ======================================================================
 
 /// LOT global AC step multiplier.

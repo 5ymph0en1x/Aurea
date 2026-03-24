@@ -675,7 +675,7 @@ pub fn parse_aur2_header(data: &[u8]) -> io::Result<(Aur2Header, usize)> {
 }
 
 // ======================================================================
-// AUR2 v5: ADN5 hexagonal header extension
+// AUR2 v5: DNA5 hexagonal header extension
 // ======================================================================
 
 /// AUR2 v5 hexagonal header (6 bytes, appended after base Aur2Header).

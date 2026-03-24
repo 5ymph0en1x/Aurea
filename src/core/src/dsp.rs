@@ -302,7 +302,7 @@ pub fn directional_sharpen(y: &mut [f64], h: usize, w: usize, strength: f64) {
 }
 
 // ======================================================================
-// Ternary supercordes sharpening (ADN4 decoder-side)
+// Ternary supercordes sharpening (DNA4 decoder-side)
 // ======================================================================
 
 /// Ternary supercordes classification per block.

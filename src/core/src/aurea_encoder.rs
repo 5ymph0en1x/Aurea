@@ -1,8 +1,8 @@
 /// Native AUREA v10 encoder: RGB -> .aur file (AUR2 format).
-/// Modified for the A.D.N. architecture (spatial codons).
+/// Modified for the D.N.A. architecture (spatial codons).
 ///
 /// v2 (LOT): Block-based Lapped Orthogonal Transform replaces CDF 9/7 wavelet.
-/// v12: Turing morphogenesis + Psychovisual Pivot (ADN8)
+/// v12: Turing morphogenesis + Psychovisual Pivot (DNA8)
 
 use ndarray::Array2;
 
@@ -26,9 +26,9 @@ pub const FLAG_VARIABLE_BLOCKS: u16  = 0x0004; // Point 2: quadtree 8/16/32
 pub const FLAG_SCENE_ANALYSIS: u16   = 0x0008; // Point 7: scene analysis in encoder
 pub const FLAG_STRUCTURAL: u16       = 0x0010; // Point 4: structural coherence (4D codon)
 pub const FLAG_DPCM_DC: u16          = 0x0020; // Stage 3: golden DPCM for DC
-pub const FLAG_QUALITY_ADAPTIVE: u16 = 0x0040; // ADN4: quality-adaptive lot_factor, qmat_power, spin
-pub const FLAG_LOT_OVERLAP: u16      = 0x0080; // ADN4: 50% LOT overlap at high quality
-pub const FLAG_WEBER_TRNA: u16       = 0x0100; // ADN5: Weber-Fechner luminance tRNA on AC step
+pub const FLAG_QUALITY_ADAPTIVE: u16 = 0x0040; // DNA4: quality-adaptive lot_factor, qmat_power, spin
+pub const FLAG_LOT_OVERLAP: u16      = 0x0080; // DNA4: 50% LOT overlap at high quality
+pub const FLAG_WEBER_TRNA: u16       = 0x0100; // DNA5: Weber-Fechner luminance tRNA on AC step
 pub const FLAG_BAYESIAN_HIERARCHY: u16 = 0x0200; // v12: Bayesian predictive hierarchy
 pub const FLAG_CFL: u16              = 0x0400; // v12: Chroma-from-Luma prediction
 
@@ -65,7 +65,7 @@ pub struct AureaEncoderResult {
 }
 
 // ======================================================================
-// ADN8: Psychovisual Turing Pivot (high-rate vs low-rate)
+// DNA8: Psychovisual Turing Pivot (high-rate vs low-rate)
 // ======================================================================
 /// Computes the Turing modulation factor with a psychovisual pivot.
 /// At low bitrate (quality < 50): gamma > 0, preserves structure (sharp edges), sacrifices smooth areas.
@@ -115,7 +115,7 @@ pub fn auto_detail_step(l_channel: &[f64], height: usize, width: usize, quality:
     let complexity = (mean_energy + 1.0).log2();
     let c_norm = ((complexity - 6.0) / 5.0).clamp(0.0, 1.0);
     let q_frac = (quality as f64 / 100.0).clamp(0.01, 1.0);
-    // Exponential mapping calibrated on 6 HD images (adn5 benchmark).
+    // Exponential mapping calibrated on 6 HD images (DNA5 benchmark).
     // Correction factor 1.3x applied to close the gap with JPEG.
     // Q=0 → ~40, Q=50 → ~7.2, Q=75 → ~3.3, Q=90 → ~2.0, Q=100 → ~1.0
     let base_step = 39.0 * (-3.5 * q_frac).exp() + 0.9;
@@ -1337,7 +1337,7 @@ pub fn encode_unified(
                 n_representatives: quality_to_n_repr(params.quality),
                 geometric: false,
             };
-            encode_aur2(rgb, width, height, &p)
+            encode_aur2_v12(rgb, width, height, &p)
         }
         Pipeline::EdgeEnergy => {
             crate::hex_encoder::encode_edge_energy(rgb, width, height, params.quality)

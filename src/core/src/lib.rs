@@ -468,7 +468,7 @@ fn decode_edge_energy(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std::err
     })
 }
 
-/// ADN5 hexagonal decoder: full pipeline.
+/// DNA5 hexagonal decoder: full pipeline.
 ///
 /// Pipeline: parse headers -> rANS decode DC/AC/codons -> DPCM inverse ->
 /// IDCT-II -> harmonic background + texture field -> scatter to pixels ->
@@ -900,7 +900,7 @@ fn decode_aur2_hex(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std::error:
     })
 }
 
-/// ADN7 hierarchical hex pyramid decoder: 4-level multi-resolution tessellation.
+/// DNA7 hierarchical hex pyramid decoder: 4-level multi-resolution tessellation.
 ///
 /// Pipeline: parse headers -> for each level (R=13,8,5,3): decode hex positions,
 /// DC/AC/codons -> reconstruct interiors -> ADD to accumulator -> inverse PTF ->
@@ -1478,7 +1478,7 @@ fn decode_aur2_hex_pyramid(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std
     })
 }
 
-/// ADN6 multi-scale hexagonal decoder: fractal granulometry with Fibonacci radii.
+/// DNA6 multi-scale hexagonal decoder: fractal granulometry with Fibonacci radii.
 ///
 /// Pipeline: parse headers -> read radius map -> read per-cell data ->
 /// rANS decode DC/AC/codons -> DPCM inverse -> IDCT-II per cell radius ->
@@ -2795,7 +2795,7 @@ fn decode_aur2_v3(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std::error::
     // The 32×32 blocks on smooth areas already provide naturally smoother DC
     // (larger averaging = less quantization noise per pixel).
 
-    // ADN4: Ternary supercordes sharpening — decoder-side, zero bpp.
+    // DNA4: Ternary supercordes sharpening — decoder-side, zero bpp.
     // Sharpens Segment/Arc blocks, leaves Rien untouched.
     dsp::supercordes_sharpen(
         &mut l_flat, height, width,
@@ -3346,10 +3346,18 @@ fn decode_aur2_v12(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std::error:
     }
 
     let mut l_flat = reconstructed_channels.remove(0);
-    let c1_sub_flat = reconstructed_channels.remove(0);
-    let c2_sub_flat = reconstructed_channels.remove(0);
+    let mut c1_sub_flat = reconstructed_channels.remove(0);
+    let mut c2_sub_flat = reconstructed_channels.remove(0);
 
-    // v12: no deblocking, no supercordes, no CAS sharpening — straight to PTF inverse.
+    // v12: gas-only deblocking (smooth-zone block boundaries only)
+    dsp::deblock_gas_only(&mut l_flat, height, width, LOT_BLOCK_SIZE);
+    dsp::deblock_gas_only(&mut c1_sub_flat, c1_h, c1_w, LOT_BLOCK_SIZE);
+    dsp::deblock_gas_only(&mut c2_sub_flat, c2_h, c2_w, LOT_BLOCK_SIZE);
+
+    // v12: anti-ring sigma filter — cleans mixed-block artifacts near edges.
+    // Sky pixels in blocks straddling tree/sky boundary get pulled toward correct
+    // sky values by excluding dark tree pixels from the local sigma average.
+    dsp::anti_ring_sigma(&mut l_flat, height, width, detail_step);
 
     // PTF inverse on L channel
     {
