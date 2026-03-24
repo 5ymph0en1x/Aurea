@@ -1154,8 +1154,9 @@ pub fn encode_aur2_v12(
     // ------------------------------------------------------------------
     {
         let ch = &channels_lot[0];
-        body.extend_from_slice(&(ch.grid_h as u16).to_le_bytes());
-        body.extend_from_slice(&(ch.grid_w as u16).to_le_bytes());
+        // v12: write n_blocks as u32 to support >65535 blocks (large images + variable blocks)
+        let n_blocks_ch0 = ch.grid_h * ch.grid_w;
+        body.extend_from_slice(&(n_blocks_ch0 as u32).to_le_bytes());
         body.extend_from_slice(&(dc_data[0].dc_encoded.len() as u32).to_le_bytes());
         body.extend_from_slice(&dc_data[0].dc_encoded);
         // Match section (luma only)
@@ -1191,9 +1192,9 @@ pub fn encode_aur2_v12(
             }
         }
 
-        // Write channel header (grid dims + DC)
-        body.extend_from_slice(&(ch.grid_h as u16).to_le_bytes());
-        body.extend_from_slice(&(ch.grid_w as u16).to_le_bytes());
+        // Write channel header (n_blocks as u32 + DC)
+        let n_blocks_ch = ch.grid_h * ch.grid_w;
+        body.extend_from_slice(&(n_blocks_ch as u32).to_le_bytes());
         body.extend_from_slice(&(dc_data[ch_idx].dc_encoded.len() as u32).to_le_bytes());
         body.extend_from_slice(&dc_data[ch_idx].dc_encoded);
 

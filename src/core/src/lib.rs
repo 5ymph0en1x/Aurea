@@ -3006,9 +3006,16 @@ fn decode_aur2_v12(file_data: &[u8]) -> Result<DecodedImage, Box<dyn std::error:
     let mut cfl_data: Vec<CflChannelData> = Vec::new(); // index 0 = ch1, index 1 = ch2
 
     for ch_idx in 0..3usize {
-        let grid_h = read_u16(body, &mut pos) as usize;
-        let grid_w = read_u16(body, &mut pos) as usize;
-        let n_blocks = grid_h * grid_w;
+        // v12: n_blocks stored as u32 (supports >65535 blocks for large images)
+        let n_blocks = read_u32(body, &mut pos) as usize;
+        let (grid_h, grid_w) = if let Some(ref vb) = var_blocks {
+            (vb.len(), 1)
+        } else {
+            // Reconstruct grid dims from n_blocks for non-variable mode
+            let gw = (width + LOT_BLOCK_SIZE - 1) / LOT_BLOCK_SIZE;
+            let gh = if gw > 0 { n_blocks / gw } else { n_blocks };
+            (gh, gw)
+        };
 
         // DC via rANS v12 (Exp-Golomb)
         let dc_rans_size = read_u32(body, &mut pos) as usize;
