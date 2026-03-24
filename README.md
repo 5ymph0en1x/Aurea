@@ -19,6 +19,11 @@ Written entirely in Rust. Ships as a CLI encoder/decoder, a native GUI viewer, a
 
 *JPEG (left) vs AUREA (right) at similar bitrate. Notice how AUREA preserves sharp color transitions at full 4:4:4 resolution, while JPEG introduces chroma bleeding from 4:2:0 subsampling.*
 
+
+<p align="center">
+  <img src="samples/rate_distortion.png" />
+</p>
+
 ---
 
 ## Architecture
