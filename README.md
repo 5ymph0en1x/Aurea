@@ -214,6 +214,113 @@ Aurea/
   scripts/            # Windows install/uninstall
 ```
 
+```mermaid
+flowchart TD
+    %% --- STYLES ---
+    classDef encoder fill:#e1f5fe,stroke:#0288d1,stroke-width:2px;
+    classDef decoder fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
+    classDef bitstream fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
+    classDef zeroCost fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,stroke-dasharray: 5 5;
+    classDef highlight fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;
+
+    %% ================= ENCODER PIPELINE =================
+    subgraph ENCODER ["ENCODER PIPELINE (Left)"]
+        direction TB
+        E_RGB["RGB Image (W × H × 3)"]:::encoder
+        
+        %% Stage 1
+        E_GCT["S1: Golden Color Transform (GCT)\nL_φ, C1, C2 using φ"]:::highlight
+        E_RGB --> E_GCT
+        E_GCT --> E_C1["C1 Plane (4:4:4)"]:::encoder
+        E_GCT --> E_C2["C2 Plane (4:4:4)"]:::encoder
+        E_GCT --> E_PTF["S1: Perceptual Transfer Function\nExpands dark levels"]:::encoder
+        E_PTF --> E_Scene["Scene Analysis\n(step_factor)"]:::encoder
+        
+        %% Stage 2
+        E_PTF --> E_Block["S2: Variable Block Classification\n(8x8 to 32x32)"]:::encoder
+        E_C1 --> E_Block
+        E_C2 --> E_Block
+        E_Block --> E_LOT["S2: Lapped Orthogonal Transform\nForward 2D DCT-II"]:::encoder
+        
+        E_LOT --> E_DC["DC Grid (1 per block)"]:::encoder
+        E_LOT --> E_AC["AC Blocks (N²-1 per block)"]:::encoder
+        
+        %% Stage 3 & 4
+        E_DC --> E_DC_Q["S3: Dead-zone Quantization"]:::encoder
+        E_DC_Q --> E_DPCM["S3: Golden DPCM Prediction"]:::highlight
+        E_DPCM --> E_DC_Entropy["S3: rANS v12 Entropy Coding"]:::encoder
+        
+        E_DC --> E_Turing["S4: Turing Morphogenesis Field\n(Zero-bit Saliency, DoG)"]:::zeroCost
+        E_Turing --> E_Pivot["Psychovisual Turing Pivot\n(Quality adaptive mod)"]:::zeroCost
+        
+        %% Stage 5
+        E_AC --> E_AC_Q["S5: AC Quantization\nFreq, CSF, Foveal, Turing mods"]:::encoder
+        E_Pivot --> E_AC_Q
+        E_AC_Q --> E_Zigzag["Zigzag Scan & EOB Truncation"]:::encoder
+        
+        %% Stage 6
+        E_Zigzag --> E_CfL["S6: Chroma-from-Luma (CfL)\nPrediction in AC domain"]:::encoder
+        
+        %% Stage 7
+        E_CfL --> E_Entropy["S7: rANS v12 Assembly\n(EOB, AC, CfL, Map)"]:::encoder
+    end
+
+    %% ================= BITSTREAM =================
+    subgraph BITSTREAM ["AUR2 BITSTREAM (Center)"]
+        direction TB
+        B_Head["AUR2 Header (39 bytes)\nMagic, Version, Q, Dims"]:::bitstream
+        B_Pre["Body Preamble\nChroma dims, Turing Params, Map"]:::bitstream
+        B_Ch0["Channel 0: Luma (L_φ)\nDC, EOB, AC"]:::bitstream
+        B_Ch1["Channel 1: C1 (Blue-Yellow)\nDC, CfL, EOB, AC"]:::bitstream
+        B_Ch2["Channel 2: C2 (Red-Cyan)\nDC, CfL, EOB, AC"]:::bitstream
+        
+        B_Head --> B_Pre --> B_Ch0 --> B_Ch1 --> B_Ch2
+    end
+
+    %% ================= DECODER PIPELINE =================
+    subgraph DECODER ["DECODER PIPELINE (Right)"]
+        direction TB
+        
+        %% Stage D1
+        D_Parse["D1: Bitstream Parsing"]:::decoder
+        
+        %% Stage D2
+        D_Parse --> D_DC_Dec["D2: rANS v12 Decode (DC)"]:::decoder
+        D_DC_Dec --> D_DPCM_Inv["D2: Golden DPCM Inverse"]:::highlight
+        D_DPCM_Inv --> D_DC_Recon["D2: Dequantize DC"]:::decoder
+        
+        %% Stage D3
+        D_DC_Recon --> D_Turing["D3: Turing Field Recon\n(Identical to Encoder)"]:::zeroCost
+        
+        %% Stage D4
+        D_Parse --> D_AC_Dec["D4: rANS v12 Decode (AC/EOB)"]:::decoder
+        D_AC_Dec --> D_AC_Scatter["D4: Scatter & Zero-fill"]:::decoder
+        D_Turing --> D_AC_Dequant["D4: Dequantize AC\n(Exact mirror)"]:::decoder
+        D_AC_Scatter --> D_AC_Dequant
+        
+        %% Stage D5
+        D_Parse --> D_CfL_Dec["D5: rANS v12 Decode (CfL)"]:::decoder
+        D_AC_Dequant --> D_CfL_Apply["D5: CfL Reconstruction\nC_ac = res + α·L_rec"]:::decoder
+        D_CfL_Dec --> D_CfL_Apply
+        
+        %% Stage D6
+        D_DC_Recon --> D_LOT_Inv["D6: LOT Synthesis\nInverse 2D DCT-II"]:::decoder
+        D_CfL_Apply --> D_LOT_Inv
+        D_LOT_Inv --> D_Overlap["D6: Sine Window &\nOverlap-Add Accumulation"]:::decoder
+        
+        %% Stage D7
+        D_Overlap --> D_PTF_Inv["D7: Inverse PTF"]:::decoder
+        D_PTF_Inv --> D_GCT_Inv["D7: Inverse Golden Color Transform"]:::highlight
+        D_GCT_Inv --> D_RGB["RGB Image Output"]:::decoder
+    end
+
+    %% ================= CONNECTIONS ACROSS COLUMNS =================
+    E_DC_Entropy --> B_Ch0
+    E_Entropy --> B_Ch0
+    
+    B_Ch2 --> D_Parse
+```
+
 ---
 
 ## License
