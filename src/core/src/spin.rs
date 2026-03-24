@@ -1,6 +1,8 @@
 //! Fibonacci spectral spin + dither.
 //! Decoder-only enhancements for PSNR recovery and perceived sharpness.
 
+use rayon::prelude::*;
+
 /// Blend ratio: conservative start (v6 spectral spin precedent).
 /// Target: phi_inv² = 0.382 (golden partition). Increase empirically.
 const SPIN_MEDIAN_WEIGHT: f64 = 0.382; // phi_inv² — golden partition
@@ -14,18 +16,37 @@ pub fn fibonacci_spectral_spin(
     grid_w: usize,
     ac_per_block: usize,
     local_steps: &[f64],
+    spin_weight: f64,
 ) {
     if grid_h * grid_w < 2 { return; }
 
-    let orig_weight = 1.0 - SPIN_MEDIAN_WEIGHT;
-    let med_weight = SPIN_MEDIAN_WEIGHT;
+    let med_weight = spin_weight.clamp(0.0, 0.5);
 
     let snapshot: Vec<Vec<f64>> = ac_blocks.iter().map(|b| b.clone()).collect();
+
+    // Gas/Solid classification in frequency domain.
+    // Gas (smooth): low AC energy → variations between blocks are quantization noise → spin.
+    // Solid (textured): high AC energy → variations are SIGNAL → preserve intact.
+    // Same philosophy as deblock_gas_only in spatial domain.
+    let block_energies: Vec<f64> = snapshot.iter().enumerate().map(|(i, block)| {
+        let step = local_steps[i].max(0.1);
+        // Normalize by local step: energy/step = number of "significant" quanta.
+        // Gas: few significant coefficients. Solid: many.
+        block.iter().map(|v| v.abs()).sum::<f64>() / (block.len().max(1) as f64 * step)
+    }).collect();
 
     for gy in 0..grid_h {
         for gx in 0..grid_w {
             let idx = gy * grid_w + gx;
             let step = local_steps[idx].max(0.1);
+
+            // Gas/Solid gate: normalized energy below 1.0 = gas, above = solid.
+            // Gas gets full spin, solid gets none. Linear ramp in [0.5, 1.5].
+            let e = block_energies[idx];
+            let gas_gate = (1.5 - e).clamp(0.0, 1.0);
+            let block_med_weight = med_weight * gas_gate;
+            if block_med_weight < 1e-6 { continue; } // solid block: skip entirely
+            let block_orig_weight = 1.0 - block_med_weight;
 
             for ac_pos in 0..ac_per_block {
                 let current = snapshot[idx][ac_pos];
@@ -41,7 +62,7 @@ pub fn fibonacci_spectral_spin(
                 let med = neighbors[neighbors.len() / 2];
 
                 if (med - current).abs() < step {
-                    ac_blocks[idx][ac_pos] = orig_weight * current + med_weight * med;
+                    ac_blocks[idx][ac_pos] = block_orig_weight * current + block_med_weight * med;
                 }
             }
         }
@@ -67,7 +88,8 @@ pub fn fibonacci_dither(
     let lut = fibonacci_lut();
     const PHI_INT: u64 = 0x9E3779B97F4A7C15;
 
-    for y in 0..h {
+    // Parallel per-row dithering
+    plane.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
         for x in 0..w {
             let fib_phase = ((y as u64).wrapping_mul(2654435761)
                 .wrapping_add((x as u64).wrapping_mul(40503))
@@ -86,9 +108,9 @@ pub fn fibonacci_dither(
             let grad = grad_y.max(grad_x);
             let texture_mask = (1.0 - grad / local_step.max(1.0)).clamp(0.0, 1.0);
 
-            plane[y * w + x] = src[y * w + x] + fib_val * amplitude * texture_mask;
+            row_out[x] = src[y * w + x] + fib_val * amplitude * texture_mask;
         }
-    }
+    });
 }
 
 /// Bilinear DC interpolation: smooths block-constant DC into continuous gradients.
@@ -158,10 +180,15 @@ pub fn spatial_spectral_spin(plane: &mut [f64], h: usize, w: usize) {
     if h < 5 || w < 5 { return; }
 
     let src = plane.to_vec();
-    const PAD: usize = 2; // 5x5 kernel, radius 2
-    let mut buf = [0.0f64; 25]; // 5x5 neighborhood
+    const PAD: usize = 2;
 
-    for y in PAD..h - PAD {
+    // Parallel per-row: each row's median filter is independent
+    let interior_rows = h - 2 * PAD;
+    let mut output_rows = vec![0.0f64; interior_rows * w];
+
+    output_rows.par_chunks_mut(w).enumerate().for_each(|(ri, row_out)| {
+        let y = ri + PAD;
+        let mut buf = [0.0f64; 25];
         for x in PAD..w - PAD {
             let mut count = 0;
             for dy in 0..5 {
@@ -170,13 +197,18 @@ pub fn spatial_spectral_spin(plane: &mut [f64], h: usize, w: usize) {
                     count += 1;
                 }
             }
-            // Partial sort for median (13th element of 25)
             buf[..25].select_nth_unstable_by(12, |a, b| a.partial_cmp(b).unwrap());
-            let med = buf[12];
-
-            // Echolot blend: 92% original + 8% median
-            plane[y * w + x] = src[y * w + x] * 0.92 + med * 0.08;
+            row_out[x] = src[y * w + x] * 0.92 + buf[12] * 0.08;
         }
+        // Copy border pixels unchanged
+        for x in 0..PAD { row_out[x] = src[y * w + x]; }
+        for x in w - PAD..w { row_out[x] = src[y * w + x]; }
+    });
+
+    // Write back
+    for ri in 0..interior_rows {
+        let y = ri + PAD;
+        plane[y * w..(y + 1) * w].copy_from_slice(&output_rows[ri * w..(ri + 1) * w]);
     }
 }
 
@@ -209,28 +241,49 @@ mod tests {
     fn test_spectral_spin_flat_blocks() {
         let mut ac = vec![vec![10.0, 5.0, -3.0, 1.0]; 4];
         let steps = vec![20.0; 4];
-        fibonacci_spectral_spin(&mut ac, 2, 2, 4, &steps);
+        fibonacci_spectral_spin(&mut ac, 2, 2, 4, &steps, 0.382);
         for block in &ac {
             assert!((block[0] - 10.0).abs() < 0.01);
         }
     }
 
     #[test]
-    fn test_spectral_spin_corrects_outlier() {
-        let mut ac = vec![vec![10.0], vec![20.0], vec![10.0]];
-        let steps = vec![15.0; 3];
-        fibonacci_spectral_spin(&mut ac, 1, 3, 1, &steps);
-        // Corrected = (1 - SPIN_MEDIAN_WEIGHT) * 20 + SPIN_MEDIAN_WEIGHT * 10
-        let expected = (1.0 - SPIN_MEDIAN_WEIGHT) * 20.0 + SPIN_MEDIAN_WEIGHT * 10.0;
-        assert!((ac[1][0] - expected).abs() < 0.01, "got {} expected {}", ac[1][0], expected);
+    fn test_spectral_spin_corrects_gas_outlier() {
+        // Gas blocks (low energy relative to step): spin should correct
+        let mut ac = vec![vec![1.0], vec![3.0], vec![1.0]];
+        let steps = vec![15.0; 3]; // energy/step << 1 → gas
+        fibonacci_spectral_spin(&mut ac, 1, 3, 1, &steps, 0.382);
+        // Gas gate ≈ 1.0, so correction ≈ full weight
+        assert!(ac[1][0] < 3.0, "gas outlier should be corrected toward neighbors, got {}", ac[1][0]);
+        assert!(ac[1][0] > 1.0, "but not overcorrected, got {}", ac[1][0]);
+    }
+
+    #[test]
+    fn test_spectral_spin_preserves_solid() {
+        // Solid blocks (high energy): spin should NOT blur
+        let mut ac = vec![vec![50.0], vec![60.0], vec![50.0]];
+        let steps = vec![15.0; 3]; // energy/step >> 1 → solid
+        let orig = 60.0;
+        fibonacci_spectral_spin(&mut ac, 1, 3, 1, &steps, 0.382);
+        // Solid gate ≈ 0.0, value should be nearly unchanged
+        assert!((ac[1][0] - orig).abs() < 1.0,
+            "solid block should be preserved, got {} expected ~{}", ac[1][0], orig);
     }
 
     #[test]
     fn test_spectral_spin_guard_clause() {
         let mut ac = vec![vec![10.0], vec![100.0], vec![10.0]];
         let steps = vec![15.0; 3];
-        fibonacci_spectral_spin(&mut ac, 1, 3, 1, &steps);
+        fibonacci_spectral_spin(&mut ac, 1, 3, 1, &steps, 0.382);
         assert!((ac[1][0] - 100.0).abs() < 0.01, "should be unchanged, got {}", ac[1][0]);
+    }
+
+    #[test]
+    fn test_spectral_spin_zero_weight() {
+        let mut ac = vec![vec![10.0], vec![20.0], vec![10.0]];
+        let steps = vec![15.0; 3];
+        fibonacci_spectral_spin(&mut ac, 1, 3, 1, &steps, 0.0);
+        assert!((ac[1][0] - 20.0).abs() < 0.01, "zero weight should not change values, got {}", ac[1][0]);
     }
 
     #[test]

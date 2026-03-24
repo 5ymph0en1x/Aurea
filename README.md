@@ -1,177 +1,181 @@
-# Aurea
+# AUREA
 
-**An image codec built on the golden ratio.**
+**A lossy image codec built on the Golden Ratio, Turing morphogenesis, and rANS entropy coding.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
 
-Aurea is a lossy image codec that weaves the golden ratio into every stage of compression -- from its Golden Color Transform to DNA-inspired codon quantization to Fibonacci-weighted prediction. It produces .aur files that preserve perceptual naturalness where block-based codecs fail.
+AUREA is an experimental image codec that replaces JPEG's 1992-era Huffman tables and fixed 8x8 blocks with a modern pipeline: variable-size Lapped Orthogonal Transform (8/16/32), psychovisual Turing saliency fields, Chroma-from-Luma prediction, and rANS entropy coding with Exp-Golomb magnitudes.
 
-Measured across 12 HD images with neural perceptual metrics (LPIPS, DISTS, FSIM, NIQE), Aurea produces images rated 25% more natural than JPEG at low bitrate (NIQE 4.37 vs 5.79 at q=20), while maintaining near-perfect structural fidelity (FSIM > 0.997 at all quality levels). At high quality (q >= 85), both codecs converge toward transparency -- but at low-to-medium quality where compression artifacts matter most, Aurea's artifacts are smooth and invisible where JPEG's 8x8 blocking is not.
+On the standard **Kodak 24** benchmark, AUREA v12 achieves **-5.9% BD-Rate vs JPEG** (22/24 images won), while retaining full **4:4:4 chroma** resolution — no color subsampling, no chroma bleeding.
 
-Written in Rust. Ships as a CLI encoder/decoder, a native GUI viewer, and a Windows shell extension with Explorer thumbnails and WIC integration.
+Written entirely in Rust. Ships as a CLI encoder/decoder, a native GUI viewer, and a Windows shell extension with Explorer thumbnails.
 
 ---
 
 <p align="center">
-  <img src="samples/alchemist_JPEG-q40.jpg" width="45%" />
-  <img src="samples/alchemist_AUREA-q20.png" width="45%" />
+  <img src="samples/alchemist_JPEG-q85.jpg" width="45%" alt="JPEG 4:2:0"/>
+  <img src="samples/alchemist_AUREA-q85.png" width="45%" alt="AUREA 4:4:4"/>
 </p>
 
-<p align="center">
-  <img src="samples/perceptual_metrics.png" />
-</p>
-
-## How It Works
-
-### Encode (ADN3 pipeline)
-
-```
-RGB --> Golden Color Transform (GCT) --> PTF gamma 0.65
-  --> 4:4:4 full-resolution chroma (no subsampling)
-  --> LOT: DCT 16x16 block analysis
-  --> DC: fine quantization (0.1x step) + golden DPCM prediction + rANS
-  --> AC: QMAT-weighted quantization + codon-adaptive step + zigzag + rANS
-  --> .aur file (AUR2 format, version 3)
-```
-
-### Decode
-
-```
-.aur --> rANS decode --> golden DPCM DC reconstruction
-  --> AC dequantization (codon + CSF modulation)
-  --> Fibonacci spectral spin (AC median regularization)
-  --> LOT synthesis (IDCT 16x16)
-  --> Gas-only deblocking (boundary smoothing in smooth zones)
-  --> Inverse PTF --> Inverse GCT --> RGB
-```
+*JPEG (left) vs AUREA (right) at similar bitrate. Notice how AUREA preserves sharp color transitions at full 4:4:4 resolution, while JPEG introduces chroma bleeding from 4:2:0 subsampling.*
 
 ---
 
-## Architecture: ADN3
+## Architecture
 
-Aurea ADN3 is the third-generation encoding architecture, replacing the earlier wavelet-based pipeline with a Lapped Orthogonal Transform (LOT) and a set of Fibonacci-guided optimizations.
+### 1. Golden Color Transform (GCT)
 
-### Golden Color Transform
-
-Standard codecs use YCbCr. Aurea uses a color space derived from the golden ratio:
+AUREA uses a color space derived from the golden ratio:
 
 ```
 L  = (R + phi * G + phi^-1 * B) / (2 * phi)
-C1 = B - L    (blue chrominance)
-C2 = R - L    (red chrominance)
+C1 = B - L    (blue-yellow chroma)
+C2 = R - L    (red-cyan chroma)
 ```
 
-where phi = (1 + sqrt(5)) / 2 = 1.618. Green carries the most perceptual information in natural images, receiving weight phi while blue receives phi^-1. The inverse uses only phi^-1 and phi^-2 (Fibonacci sequence).
+Green receives the phi weight (~0.500), red ~0.309, blue ~0.191 — close to BT.601 but derived from a single constant. The inverse uses only phi^-1 and phi^-2. This decorrelation makes chroma naturally sparse, enabling **4:4:4 encoding** (no subsampling) at competitive bitrates.
 
-**4:4:4 full-resolution chroma**: Unlike JPEG (which subsamples chroma to 4:2:0), Aurea encodes all three channels at full resolution. The GCT decorrelates so effectively that the chroma channels are naturally sparse -- the extra resolution costs only ~20% more bits but adds **+0.65 dB PSNR**, with dramatically better color fidelity on saturated edges (red plumes, sunset gradients).
+A **Perceptual Transfer Function** (PTF, gamma 0.65) is applied to luminance before transform, expanding dark levels to match the Weber-Fechner law of human perception.
 
-### Perceptual Transfer Function (PTF)
+### 2. Lapped Orthogonal Transform (LOT)
 
-Before encoding, luminance is gamma-compressed with PTF gamma = 0.65 (Weber-Fechner perceptual expansion of dark levels). This allocates more precision to dark regions where the human eye is most sensitive, and less to bright regions where quantization is less visible.
+A variable-size LOT with sine-window lapping replaces the fixed 8x8 DCT:
 
-### Lapped Orthogonal Transform (LOT)
+- **8x8** for dense, high-frequency textures
+- **16x16** (default) for general content
+- **32x32** for smooth gradients and skies
 
-Aurea uses 16x16 DCT-II blocks (critical sampling, no overlap) for its transform. Compared to JPEG's 8x8:
+Block sizes are chosen adaptively: smooth 8x8 cells merge into larger blocks. Each block undergoes a separable 2D DCT-II with precomputed cosine LUT (no runtime trigonometry). The sine window provides overlap-add reconstruction without blocking artifacts.
 
-- **4x fewer DC coefficients** to encode (one per 16x16 block vs one per 8x8)
-- **Better energy compaction** at low frequencies (larger blocks capture more structure)
-- **Golden DPCM** for DC prediction: each block's DC is predicted from its left, top, and top-left neighbors with Fibonacci-weighted coefficients (50% left, 31% top, 19% diagonal), reducing DC stream size by 16%
+### 3. Turing Morphogenesis (zero-bit saliency)
 
-DC is quantized with a **fine step** (0.1x detail_step) giving ~365 distinct levels for smooth gradients, eliminating the banding artifacts that plague coarser DC quantization.
+A Difference-of-Gaussians saliency field is computed from the DC grid:
 
-### Quantization
+```
+Activator  = GaussianBlur(Sobel(DC), sigma_a = 1.5)
+Inhibitor  = GaussianBlur(Sobel(DC), sigma_i = sigma_a * phi^2)
+Turing     = normalize(ReLU(Activator - Inhibitor))
+step_mod   = phi^(-0.5 * T_norm)
+```
 
-AC coefficients are quantized with a frequency-dependent matrix (QMAT_16, calibrated from 12 HD reference images) and a **codon-adaptive step** that varies per block based on:
+This produces a per-block quantization modulation: edges get finer quantization (preserve structure), smooth regions get coarser (save bits). **Cost: zero bits** — both encoder and decoder compute identical fields from the already-transmitted DC grid.
 
-1. **Luminance** (Weber-Fechner): dark blocks get finer quantization (the eye is more sensitive in shadows)
-2. **Saturation**: highly chromatic blocks get 15% finer quantization (preserves color detail)
-3. **CSF modulation**: high-frequency coefficients in dark blocks are quantized more aggressively (the eye is less sensitive to HF in low luminance)
+A **psychovisual pivot** adapts behavior to bitrate: at low quality, gamma > 0 preserves edges; at high quality, gamma < 0 protects smooth areas (anti-banding). The transition uses a cubic smoothstep.
 
-Dead zone = 0.22 (eliminates sub-threshold quantization noise).
+### 4. Quantization
 
-### Entropy Coding
+Each AC coefficient receives a custom quantization step:
 
-All coefficient streams (DC residuals, AC coefficients) are encoded with **rANS** (asymmetric numeral systems) using a Laplacian context model with 32 states, adaptive probability estimation, and run-length classification for zero sequences.
+```
+step = detail_step * lot_factor * QMAT[freq] * CSF(freq, luminance)
+     * foveal(block) * turing_mod(block) * chroma_factor
+```
 
-### Decoder Refinements
+- **QMAT**: 16x16 frequency weighting matrix, with quality-adaptive power (0.55 at low Q, 0.05 at high Q via smoothstep)
+- **CSF**: Contrast sensitivity — dark regions tolerate coarser HF quantization
+- **Dead zone**: Quality-adaptive (0.22 at Q<=70, ramps to 0.02 at Q=100), with a frequency-dependent floor for the last 25% of zigzag order (sensor noise suppression)
 
-Three decoder-side enhancements improve quality at zero bitrate cost:
+### 5. Chroma-from-Luma Prediction (CfL)
 
-- **Fibonacci spectral spin**: Median regularization of AC coefficients across neighboring blocks in the frequency domain. Blends each coefficient toward the local median (0.618/0.382 golden partition), correcting quantization outliers. Guard clause prevents correction across real edges.
-- **Gas-only deblocking**: Chirurgical boundary smoothing that only touches the 2 pixels at each 16x16 block boundary where both sides are smooth ("gas" phase). Uses phi^-2 = 0.382 blend strength. Textured regions are left untouched. PSNR-positive (+0.05 dB).
-- **Scene analysis**: Decoder classifies the image from its DC grid (Flat, Architectural, Perspective, Organic, Mixed) to adapt filter parameters.
+For each block, a least-squares regression estimates alpha = sum(L*C) / sum(L*L) in the **AC frequency domain** (not spatial):
+
+- Gated by R^2 > 0.25 correlation test
+- Alpha quantized to 3 bits (8-value palette from -0.75 to 1.0)
+- Chroma residual = C_ac - alpha * L_rec_ac (lower energy, fewer bits)
+
+This exploits the LOT's linearity: LOT(C - alpha*L) = LOT(C) - alpha*LOT(L).
+
+### 6. Entropy Coding (rANS v12)
+
+All streams use **range Asymmetric Numeral Systems** with Exp-Golomb magnitude coding:
+
+| Stream | Encoding |
+|--------|----------|
+| DC grid | Golden DPCM prediction + rANS v12 |
+| AC coefficients | Zigzag scan + EOB truncation + rANS v12 |
+| EOB positions | DPCM delta + rANS v12 |
+| CfL metadata | Flags + alpha indices packed + rANS v12 |
+| Block map | Size codes (0/1/2) + rANS v12 |
+
+The **Golden DPCM** prediction for DC: `pred = (phi^-1 * left + phi^-2 * top + phi^-3 * diag) / sum`.
+
+**Exp-Golomb order 0** for AC magnitudes >= 2: encodes value n as floor(log2(n+1)) zero bits + binary suffix. Far more efficient than unary for the Laplacian-tailed coefficient distribution.
+
+---
+
+## Benchmark Results
+
+### Kodak 24 (768x512) — BD-Rate vs JPEG
+
+| Image | BD-Rate | | Image | BD-Rate |
+|-------|--------:|-|-------|--------:|
+| kodim01 | -1.6% | | kodim13 | -7.5% |
+| kodim02 | +1.6% | | kodim14 | -2.5% |
+| kodim03 | -10.4% | | kodim15 | -5.7% |
+| kodim04 | -7.5% | | kodim16 | -12.6% |
+| kodim05 | -2.2% | | kodim17 | -6.7% |
+| kodim06 | -7.0% | | kodim18 | -3.5% |
+| kodim07 | -4.7% | | kodim19 | -11.3% |
+| kodim08 | +1.7% | | kodim20 | -6.5% |
+| kodim09 | -10.4% | | kodim21 | -6.8% |
+| kodim10 | -5.3% | | kodim22 | -5.8% |
+| kodim11 | -1.1% | | kodim23 | -14.3% |
+| kodim12 | -9.1% | | kodim24 | -2.9% |
+
+**Average BD-Rate: -5.9%** (negative = AUREA saves bits at equal PSNR).
+**Wins: 22/24 images.**
+
+AUREA qualities tested: 20, 30, 40, 50, 60, 70, 80, 90. JPEG qualities: 10-95.
+BD-Rate computed via cubic polynomial fit on log(rate) vs PSNR curves.
 
 ---
 
 ## Installation
 
 ### Download
+Grab the latest release from the [Releases](../../releases) page:
 
-Grab the latest release from the [GitHub Releases](../../releases) page:
-
-**aurea-windows-x64.zip** containing:
-- `aurea.exe` -- command-line encoder/decoder
-- `aurea-viewer.exe` -- GUI image viewer
-- `aurea_shell.dll` -- Windows Explorer shell extension
-- `install.ps1` / `uninstall.ps1` -- integration scripts
+**`aurea-windows-x64.zip`** contains:
+- `aurea.exe` — Command-line encoder/decoder
+- `aurea-viewer.exe` — GUI image viewer
+- `aurea_shell.dll` — Windows Explorer shell extension
+- `install.ps1` / `uninstall.ps1` — One-click integration
 
 ### Build from Source
 
-Requires Rust (edition 2024).
+Requires Rust (edition 2024, MSRV 1.85+).
 
-```
+```bash
 cargo build --release --workspace
 ```
 
-Produces `target/release/aurea.exe`, `aurea-viewer.exe`, and `aurea_shell.dll`.
+### Windows Shell Integration
 
-**Important**: use `--workspace` to include the shell extension DLL.
-
-### Windows Integration
-
-Run as Administrator:
+Run as Administrator for native `.aur` thumbnails in Explorer:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 ```
 
-This enables:
-- Native thumbnails for `.aur` files in Explorer
-- Double-click to open in AUREA Viewer
-- Right-click context menu: "Convert to AUREA" on any image
-- Windows Photo Viewer and WIC-compatible applications can open `.aur` files
-
-To remove:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
-```
-
 ---
 
-## Usage
+## CLI Usage
 
+```bash
+# Encode at default quality (75)
+aurea encode photo.png output.aur
+
+# Encode at maximum quality
+aurea encode photo.png output.aur -q 95
+
+# Decode back to PNG
+aurea decode compressed.aur restored.png
+
+# View file metadata
+aurea info compressed.aur
 ```
-aurea encode photo.png -q 75                    # encode at quality 75
-aurea encode photo.png output.aur --quality 50  # explicit output and quality
-aurea decode image.aur output.png               # decode to PNG
-aurea info image.aur                            # show file metadata
-```
 
-Quality ranges from 1 (smallest file) to 100 (highest fidelity). The default is 75, which targets a balance comparable to JPEG quality 85.
-
----
-
-## File Format
-
-| Field | Value |
-|---|---|
-| Extension | `.aur` |
-| Magic bytes | `AUR2` (0x41 0x55 0x52 0x32) |
-| MIME type | `image/x-aurea` |
-| Byte order | Little-endian |
-| Version | 3 (ADN3 pipeline) |
-| Features | Flags-based: CSF modulation, DPCM DC, scene analysis |
+Quality ranges from 1 to 100. Default is 75.
 
 ---
 
@@ -179,52 +183,31 @@ Quality ranges from 1 (smallest file) to 100 (highest fidelity). The default is 
 
 ```
 Aurea/
-├── src/
-│   ├── core/       # Codec library (aurea-core)
-│   │   ├── lib.rs          # Decoder (v1/v2/v3 routing)
-│   │   ├── aurea_encoder.rs # Encoder (LOT + DPCM + codon)
-│   │   ├── lot.rs          # Lapped Orthogonal Transform (DCT 16x16)
-│   │   ├── dsp.rs          # Signal processing (deblocking, anti-ring)
-│   │   ├── spin.rs         # Fibonacci spectral spin + dither
-│   │   ├── scan.rs         # Golden spiral scan order
-│   │   ├── color.rs        # Golden Color Transform + chroma
-│   │   ├── rans.rs         # rANS entropy coder
-│   │   ├── golden.rs       # phi constants (PHI, PHI_INV, PHI_INV2, PHI_INV3)
-│   │   ├── calibration.rs  # Calibrated thresholds and constants
-│   │   ├── wavelet.rs      # CDF 9/7 wavelet (v1 legacy)
-│   │   ├── geometric.rs    # Phi-supercordes (v1 legacy)
-│   │   ├── polymerase.rs   # DNA-inspired structural analysis
-│   │   ├── scene_analysis.rs # Scene classification
-│   │   └── bitstream.rs    # File format parsing/writing
-│   ├── cli/        # Command-line interface
-│   ├── viewer/     # GUI viewer (minifb)
-│   └── shell/      # Windows Explorer extension (COM/WIC)
-├── scripts/        # Windows install/uninstall
-├── benchmark/      # Calibration images + benchmark scripts
-├── samples/        # Example images
-├── docs/           # Design specs and implementation plans
-└── .github/        # CI/CD workflows
+  src/
+    core/             # Core codec library (aurea-core)
+      aurea_encoder.rs  # v12 encoder pipeline
+      lib.rs            # Decoder routing (v3, v10, v12)
+      lot.rs            # Lapped Orthogonal Transform (8/16/32, cosine LUT, rayon)
+      rans.rs           # rANS entropy coder (v1 + v12 Exp-Golomb)
+      turing.rs         # Turing morphogenesis field (DoG saliency)
+      cfl.rs            # Chroma-from-Luma AC-domain prediction
+      hierarchy.rs      # Bayesian predictive hierarchy orchestration
+      calibration.rs    # Quality-adaptive parameters and calibrated constants
+      color.rs          # Golden Color Transform (4:4:4, rayon)
+      spin.rs           # Fibonacci spectral spin (decoder refinement)
+      dsp.rs            # Signal processing (Gaussian blur, anti-ring)
+      golden.rs         # Phi constants and PTF
+      scan.rs           # Zigzag and golden spiral scan orders
+      scene_analysis.rs # DC-based scene classification
+      geometric.rs      # Geometric primitives (phi-frequency superstrings)
+      polymerase.rs     # DNA-inspired structural sequencing
+    cli/              # Command-line interface
+    viewer/           # GUI viewer (native Windows)
+    shell/            # Windows Explorer extension (COM/WIC)
+  benchmark/          # Test images and benchmark scripts
+  docs/               # Architecture specs and design documents
+  scripts/            # Windows install/uninstall
 ```
-
----
-
-## Design Philosophy
-
-Aurea is built on a single mathematical constant: **phi = (1 + sqrt(5)) / 2**.
-
-- The **color transform** weights channels by phi, phi^-1, phi^-2
-- The **DC prediction** weights neighbors by phi^-1, phi^-2, phi^-3
-- The **dead zone** and **deblocking blend** use phi^-2 = 0.382
-- The **codon thresholds** follow Weber-Fechner zones calibrated across 12 reference images
-- The **CSF modulation** uses phi^-2 as the dark-frequency boost factor
-
-Whether the golden ratio is mathematically optimal for image compression or simply provides a coherent design framework that avoids arbitrary magic numbers is an open question. What the benchmarks show is that it works.
-
----
-
-## Why "Aurea"
-
-From *aurea ratio* -- the golden ratio. The codec is named for the mathematical constant that governs its color transform, its quantization geometry, and its prediction weights.
 
 ---
 

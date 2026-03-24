@@ -22,6 +22,13 @@ const ADAPT_SHIFT: u32 = 4;   // adaptation rate: 1/16 per symbol
 const ENERGY_ALPHA: u32 = 218; // IIR smoothing: alpha/256
 const ENERGY_SCALE: u32 = 256;
 
+// v11 expanded context model (hyper-sparse: 6 run buckets instead of 4)
+const N_CTX_ZERO_V11: usize = 48; // run_class_v11(6) x prev_nz(2) x energy_bucket(4)
+
+// v12 Bayesian predictive hierarchy context model
+const N_CTX_ZERO_V12: usize = 128; // run_class(4) x prev_nz(2) x energy_bucket(4) x turing_bucket(4)
+const N_CTX_PM1_V12: usize = 32;   // energy_bucket(4) x prev_was_pm1(2) x turing_bucket(4)
+
 // Paeth context model
 const N_PAETH_CTX: usize = 8; // sign(2) x mag_bucket(4)
 const PAETH_ADAPT_SHIFT: u32 = 5; // slower adaptation for Paeth (1/32)
@@ -156,6 +163,20 @@ fn run_class(run_zeros: u32) -> usize {
     }
 }
 
+/// Classify run length into 6 buckets for v11 hyper-sparse contexts.
+/// Extra granularity for long zero-runs (denoised gas regions).
+#[inline]
+fn run_class_v11(run_zeros: u32) -> usize {
+    match run_zeros {
+        0 => 0,
+        1 => 1,
+        2 | 3 => 2,
+        4..=15 => 3,
+        16..=63 => 4,
+        _ => 5,
+    }
+}
+
 /// Classify energy into 4 buckets.
 #[inline]
 fn energy_bucket(energy: u32) -> usize {
@@ -272,6 +293,228 @@ impl ContextModel {
             / ENERGY_SCALE;
 
         // Update run state
+        if is_zero {
+            self.run_zeros = self.run_zeros.saturating_add(1);
+        } else {
+            self.run_zeros = 0;
+            self.prev_was_pm1 = is_pm1;
+        }
+        self.prev_nz = !is_zero;
+    }
+}
+
+// ======================================================================
+// v11 Adaptive Context Model (hyper-sparse: 6 run-class buckets)
+// ======================================================================
+
+struct ContextModelV11 {
+    /// P(zero) for each of the 48 contexts: run_class_v11(6) x prev_nz(2) x energy_bucket(4)
+    p_zero: [u32; N_CTX_ZERO_V11],
+    /// P(pm1 | nonzero) for each of the 8 contexts: energy_bucket(4) x prev_was_pm1(2)
+    p_pm1: [u32; N_CTX_PM1],
+    /// Exponentially smoothed energy (scale 256)
+    energy: u32,
+    /// Previous symbol was nonzero
+    prev_nz: bool,
+    /// Consecutive zero count
+    run_zeros: u32,
+    /// Previous nonzero symbol was +-1
+    prev_was_pm1: bool,
+}
+
+impl ContextModelV11 {
+    fn new() -> Self {
+        let mut p_zero = [0u32; N_CTX_ZERO_V11];
+        for p in p_zero.iter_mut() {
+            *p = 14000;
+        }
+        let mut p_pm1 = [0u32; N_CTX_PM1];
+        for p in p_pm1.iter_mut() {
+            *p = 12000;
+        }
+        Self {
+            p_zero,
+            p_pm1,
+            energy: 0,
+            prev_nz: false,
+            run_zeros: 0,
+            prev_was_pm1: true,
+        }
+    }
+
+    #[inline]
+    fn ctx_zero(&self) -> usize {
+        let rc = run_class_v11(self.run_zeros);
+        let pnz = if self.prev_nz { 1 } else { 0 };
+        let eb = energy_bucket(self.energy);
+        rc * 8 + pnz * 4 + eb
+    }
+
+    #[inline]
+    fn ctx_pm1(&self) -> usize {
+        let eb = energy_bucket(self.energy);
+        let pp = if self.prev_was_pm1 { 1 } else { 0 };
+        eb * 2 + pp
+    }
+
+    #[inline]
+    fn get_p_zero(&self) -> u32 {
+        self.p_zero[self.ctx_zero()].clamp(1, PROB_SCALE - 1)
+    }
+
+    #[inline]
+    fn get_p_pm1(&self) -> u32 {
+        self.p_pm1[self.ctx_pm1()].clamp(1, PROB_SCALE - 1)
+    }
+
+    fn update(&mut self, value: i16) {
+        let is_zero = value == 0;
+        let is_pm1 = value.abs() == 1;
+        let abs_val = value.unsigned_abs() as u32;
+
+        let cz = self.ctx_zero();
+        if is_zero {
+            self.p_zero[cz] += (PROB_SCALE - self.p_zero[cz]) >> ADAPT_SHIFT;
+        } else {
+            self.p_zero[cz] -= self.p_zero[cz] >> ADAPT_SHIFT;
+        }
+
+        if !is_zero {
+            let cp = self.ctx_pm1();
+            if is_pm1 {
+                self.p_pm1[cp] += (PROB_SCALE - self.p_pm1[cp]) >> ADAPT_SHIFT;
+            } else {
+                self.p_pm1[cp] -= self.p_pm1[cp] >> ADAPT_SHIFT;
+            }
+        }
+
+        let sample_energy = (abs_val * 32).min(ENERGY_SCALE);
+        self.energy = (ENERGY_ALPHA * self.energy
+            + (ENERGY_SCALE - ENERGY_ALPHA) * sample_energy)
+            / ENERGY_SCALE;
+
+        if is_zero {
+            self.run_zeros = self.run_zeros.saturating_add(1);
+        } else {
+            self.run_zeros = 0;
+            self.prev_was_pm1 = is_pm1;
+        }
+        self.prev_nz = !is_zero;
+    }
+}
+
+// ======================================================================
+// v12 Adaptive Context Model (Bayesian predictive hierarchy)
+// ======================================================================
+
+struct ContextModelV12 {
+    /// P(zero) for each of the 128 contexts: run_class(4) x prev_nz(2) x energy_bucket(4) x turing_bucket(4)
+    p_zero: [u32; N_CTX_ZERO_V12],
+    /// P(pm1 | nonzero) for each of the 32 contexts: energy_bucket(4) x prev_was_pm1(2) x turing_bucket(4)
+    p_pm1: [u32; N_CTX_PM1_V12],
+    /// Exponentially smoothed energy (scale 256)
+    energy: u32,
+    /// Previous symbol was nonzero
+    prev_nz: bool,
+    /// Consecutive zero count
+    run_zeros: u32,
+    /// Previous nonzero symbol was +-1
+    prev_was_pm1: bool,
+    /// Turing complexity level bucket (0-3), set externally per band
+    turing_level: u8,
+}
+
+impl ContextModelV12 {
+    fn new() -> Self {
+        let mut p_zero = [0u32; N_CTX_ZERO_V12];
+        for p in p_zero.iter_mut() {
+            *p = 14000;
+        }
+        let mut p_pm1 = [0u32; N_CTX_PM1_V12];
+        for p in p_pm1.iter_mut() {
+            *p = 12000;
+        }
+        Self {
+            p_zero,
+            p_pm1,
+            energy: 0,
+            prev_nz: false,
+            run_zeros: 0,
+            prev_was_pm1: false,
+            turing_level: 0,
+        }
+    }
+
+    /// Set the Turing complexity bucket for the current band (clamped to 0-3).
+    #[inline]
+    fn set_turing_level(&mut self, bucket: u8) {
+        self.turing_level = bucket.min(3);
+    }
+
+    /// Compute the context index for P(zero).
+    /// Layout: run_class * 32 + prev_nz * 16 + energy_bucket * 4 + turing_bucket
+    #[inline]
+    fn zero_ctx_index(&self) -> usize {
+        let rc = run_class(self.run_zeros);
+        let pnz = if self.prev_nz { 1 } else { 0 };
+        let eb = energy_bucket(self.energy);
+        let tb = self.turing_level as usize;
+        rc * 32 + pnz * 16 + eb * 4 + tb
+    }
+
+    /// Compute the context index for P(pm1|nonzero).
+    /// Layout: energy_bucket * 8 + prev_was_pm1 * 4 + turing_bucket
+    #[inline]
+    fn pm1_ctx_index(&self) -> usize {
+        let eb = energy_bucket(self.energy);
+        let pp = if self.prev_was_pm1 { 1 } else { 0 };
+        let tb = self.turing_level as usize;
+        eb * 8 + pp * 4 + tb
+    }
+
+    /// Get P(zero) for current context, clamped to valid range [1, PROB_SCALE-1].
+    #[inline]
+    fn get_p_zero(&self) -> u32 {
+        self.p_zero[self.zero_ctx_index()].clamp(1, PROB_SCALE - 1)
+    }
+
+    /// Get P(pm1|nonzero) for current context, clamped to valid range [1, PROB_SCALE-1].
+    #[inline]
+    fn get_p_pm1(&self) -> u32 {
+        self.p_pm1[self.pm1_ctx_index()].clamp(1, PROB_SCALE - 1)
+    }
+
+    /// Update the model after observing a symbol.
+    fn update(&mut self, symbol: i16) {
+        let is_zero = symbol == 0;
+        let is_pm1 = symbol.abs() == 1;
+        let abs_val = symbol.unsigned_abs() as u32;
+
+        // Adapt P(zero) for current context
+        let cz = self.zero_ctx_index();
+        if is_zero {
+            self.p_zero[cz] += (PROB_SCALE - self.p_zero[cz]) >> ADAPT_SHIFT;
+        } else {
+            self.p_zero[cz] -= self.p_zero[cz] >> ADAPT_SHIFT;
+        }
+
+        if !is_zero {
+            // Adapt P(pm1|nonzero) for current context
+            let cp = self.pm1_ctx_index();
+            if is_pm1 {
+                self.p_pm1[cp] += (PROB_SCALE - self.p_pm1[cp]) >> ADAPT_SHIFT;
+            } else {
+                self.p_pm1[cp] -= self.p_pm1[cp] >> ADAPT_SHIFT;
+            }
+        }
+
+        // Update energy (IIR filter): energy = alpha * energy + (1-alpha) * sample
+        let sample_energy = (abs_val * 32).min(ENERGY_SCALE);
+        self.energy = (ENERGY_ALPHA * self.energy
+            + (ENERGY_SCALE - ENERGY_ALPHA) * sample_energy)
+            / ENERGY_SCALE;
+
+        // Update run/nz state
         if is_zero {
             self.run_zeros = self.run_zeros.saturating_add(1);
         } else {
@@ -513,6 +756,378 @@ pub fn rans_decode_band(data: &[u8], n_coeffs: usize) -> (Vec<i16>, usize) {
     }
 
     (result, dec.pos())
+}
+
+// ======================================================================
+// v11 Band Encoding / Decoding (hyper-sparse contexts)
+// ======================================================================
+
+/// Encode a quantized band using v11 hyper-sparse rANS contexts.
+/// 6 run-class buckets (vs 4 in v8) for better compression of denoised regions.
+pub fn rans_encode_band_v11(coeffs: &[i16]) -> Vec<u8> {
+    if coeffs.is_empty() {
+        return Vec::new();
+    }
+
+    let n = coeffs.len();
+    let mut enc = RansEncoder::new();
+    let mut ctx = ContextModelV11::new();
+
+    struct Decision {
+        is_zero_cum: u32,
+        is_zero_freq: u32,
+        is_large_cum: Option<u32>,
+        is_large_freq: Option<u32>,
+        sign: Option<bool>,
+        unary_len: u32,
+    }
+
+    let mut decisions = Vec::with_capacity(n);
+
+    for &val in coeffs.iter() {
+        let is_zero = val == 0;
+        let p_zero = ctx.get_p_zero();
+
+        let (iz_cum, iz_freq) = if is_zero {
+            (0, p_zero)
+        } else {
+            (p_zero, PROB_SCALE - p_zero)
+        };
+
+        let mut dec = Decision {
+            is_zero_cum: iz_cum,
+            is_zero_freq: iz_freq,
+            is_large_cum: None,
+            is_large_freq: None,
+            sign: None,
+            unary_len: 0,
+        };
+
+        if !is_zero {
+            let abs_val = val.unsigned_abs();
+            let is_pm1 = abs_val == 1;
+            let p_pm1 = ctx.get_p_pm1();
+
+            let (il_cum, il_freq) = if is_pm1 {
+                (0, p_pm1)
+            } else {
+                (p_pm1, PROB_SCALE - p_pm1)
+            };
+            dec.is_large_cum = Some(il_cum);
+            dec.is_large_freq = Some(il_freq);
+            dec.sign = Some(val < 0);
+
+            if !is_pm1 {
+                dec.unary_len = (abs_val as u32).saturating_sub(2);
+            }
+        }
+
+        decisions.push(dec);
+        ctx.update(val);
+    }
+
+    // Encode backwards
+    for dec in decisions.iter().rev() {
+        if let Some(il_cum) = dec.is_large_cum {
+            if il_cum > 0 {
+                enc.put_bit(false);
+                for _ in 0..dec.unary_len {
+                    enc.put_bit(true);
+                }
+            }
+        }
+        if let Some(sign) = dec.sign {
+            enc.put_bit(sign);
+        }
+        if let (Some(cum), Some(freq)) = (dec.is_large_cum, dec.is_large_freq) {
+            enc.put(cum, freq);
+        }
+        enc.put(dec.is_zero_cum, dec.is_zero_freq);
+    }
+
+    enc.finish()
+}
+
+/// Decode a band from v11 hyper-sparse rANS-compressed bytes.
+/// Returns (quantized coefficients, bytes consumed).
+pub fn rans_decode_band_v11(data: &[u8], n_coeffs: usize) -> (Vec<i16>, usize) {
+    if n_coeffs == 0 {
+        return (Vec::new(), 0);
+    }
+
+    let mut dec = RansDecoder::new(data);
+    let mut ctx = ContextModelV11::new();
+    let mut result = Vec::with_capacity(n_coeffs);
+
+    for _ in 0..n_coeffs {
+        let p_zero = ctx.get_p_zero();
+
+        let cum = dec.get();
+        let is_zero = cum < p_zero;
+        if is_zero {
+            dec.advance(0, p_zero);
+            result.push(0);
+            ctx.update(0);
+        } else {
+            dec.advance(p_zero, PROB_SCALE - p_zero);
+
+            let p_pm1 = ctx.get_p_pm1();
+            let cum2 = dec.get();
+            let is_pm1 = cum2 < p_pm1;
+
+            if is_pm1 {
+                dec.advance(0, p_pm1);
+                let negative = dec.get_bit();
+                let val = if negative { -1i16 } else { 1i16 };
+                result.push(val);
+                ctx.update(val);
+            } else {
+                dec.advance(p_pm1, PROB_SCALE - p_pm1);
+                let negative = dec.get_bit();
+                let mut mag: u32 = 2;
+                loop {
+                    let bit = dec.get_bit();
+                    if !bit {
+                        break;
+                    }
+                    mag += 1;
+                }
+                let val = if negative { -(mag as i16) } else { mag as i16 };
+                result.push(val);
+                ctx.update(val);
+            }
+        }
+    }
+
+    (result, dec.pos())
+}
+
+// ======================================================================
+// v12 Bayesian rANS Encode / Decode (with per-coefficient turing_bucket)
+//
+// Uses Rice-Golomb coding for magnitudes >= 2, with adaptive order k
+// derived from the context's smoothed energy (zero-cost signaling).
+
+/// Derive Rice parameter k from the context's smoothed energy.
+/// energy is scaled by 32 (sample_energy = abs_val * 32).
+/// k = floor(log2(energy / 32 + 1)), clamped to [0, 6].
+#[inline]
+fn rice_k(energy: u32) -> u32 {
+    let avg_mag = (energy / 32).max(1);
+    (32 - avg_mag.leading_zeros()).saturating_sub(1).clamp(0, 6)
+}
+// ======================================================================
+
+/// Encode a detail band with v12 Bayesian context model.
+/// `turing_buckets` maps each coefficient position to a turing_bucket (0-3).
+/// Length must match `coeffs.len()`.
+pub fn rans_encode_band_v12(coeffs: &[i16], turing_buckets: &[u8]) -> Vec<u8> {
+    if coeffs.is_empty() {
+        return Vec::new();
+    }
+
+    let n = coeffs.len();
+    let mut enc = RansEncoder::new();
+    let mut ctx = ContextModelV12::new();
+
+    struct DecisionV12 {
+        is_zero_cum: u32,
+        is_zero_freq: u32,
+        is_large_cum: Option<u32>,
+        is_large_freq: Option<u32>,
+        sign: Option<bool>,
+        eg_bits: Vec<bool>, // Exp-Golomb bits for |val| >= 2
+    }
+
+    let mut decisions = Vec::<DecisionV12>::with_capacity(n);
+
+    for (i, &val) in coeffs.iter().enumerate() {
+        if i < turing_buckets.len() {
+            ctx.set_turing_level(turing_buckets[i]);
+        }
+
+        let is_zero = val == 0;
+        let p_zero = ctx.get_p_zero();
+
+        let (iz_cum, iz_freq) = if is_zero {
+            (0, p_zero)
+        } else {
+            (p_zero, PROB_SCALE - p_zero)
+        };
+
+        let mut dec = DecisionV12 {
+            is_zero_cum: iz_cum,
+            is_zero_freq: iz_freq,
+            is_large_cum: None,
+            is_large_freq: None,
+            sign: None,
+            eg_bits: Vec::new(),
+        };
+
+        if !is_zero {
+            let abs_val = val.unsigned_abs();
+            let is_pm1 = abs_val == 1;
+            let p_pm1 = ctx.get_p_pm1();
+
+            let (il_cum, il_freq) = if is_pm1 {
+                (0, p_pm1)
+            } else {
+                (p_pm1, PROB_SCALE - p_pm1)
+            };
+            dec.is_large_cum = Some(il_cum);
+            dec.is_large_freq = Some(il_freq);
+            dec.sign = Some(val < 0);
+
+            if !is_pm1 {
+                // Exp-Golomb order 0 of (abs_val - 2)
+                let n_eg = (abs_val as u32).saturating_sub(2);
+                let n1 = n_eg + 1;
+                let nbits = 32 - n1.leading_zeros();
+                let prefix_zeros = nbits - 1;
+                let mut bits = Vec::with_capacity((2 * nbits - 1) as usize);
+                for _ in 0..prefix_zeros { bits.push(false); }
+                bits.push(true);
+                for b in (0..prefix_zeros).rev() {
+                    bits.push((n1 >> b) & 1 != 0);
+                }
+                dec.eg_bits = bits;
+            }
+        }
+
+        decisions.push(dec);
+        ctx.update(val);
+    }
+
+    // Encode backwards
+    for dec in decisions.iter().rev() {
+        if let Some(il_cum) = dec.is_large_cum {
+            if il_cum > 0 {
+                for &bit in dec.eg_bits.iter().rev() {
+                    enc.put_bit(bit);
+                }
+            }
+        }
+        if let Some(sign) = dec.sign {
+            enc.put_bit(sign);
+        }
+        if let (Some(cum), Some(freq)) = (dec.is_large_cum, dec.is_large_freq) {
+            enc.put(cum, freq);
+        }
+        enc.put(dec.is_zero_cum, dec.is_zero_freq);
+    }
+
+    enc.finish()
+}
+
+/// Decode a band from v12 Bayesian rANS-compressed bytes.
+/// `turing_buckets` maps each coefficient position to a turing_bucket (0-3).
+/// Length must match `n_coeffs`.
+pub fn rans_decode_band_v12(data: &[u8], n_coeffs: usize, turing_buckets: &[u8]) -> (Vec<i16>, usize) {
+    if n_coeffs == 0 {
+        return (Vec::new(), 0);
+    }
+
+    let mut dec = RansDecoder::new(data);
+    let mut ctx = ContextModelV12::new();
+    let mut result = Vec::with_capacity(n_coeffs);
+
+    for i in 0..n_coeffs {
+        // v12: set turing_level from external bucket array before each coefficient
+        if i < turing_buckets.len() {
+            ctx.set_turing_level(turing_buckets[i]);
+        }
+
+        let p_zero = ctx.get_p_zero();
+
+        let cum = dec.get();
+        let is_zero = cum < p_zero;
+        if is_zero {
+            dec.advance(0, p_zero);
+            result.push(0);
+            ctx.update(0);
+        } else {
+            dec.advance(p_zero, PROB_SCALE - p_zero);
+
+            let p_pm1 = ctx.get_p_pm1();
+            let cum2 = dec.get();
+            let is_pm1 = cum2 < p_pm1;
+
+            if is_pm1 {
+                dec.advance(0, p_pm1);
+                let negative = dec.get_bit();
+                let val = if negative { -1i16 } else { 1i16 };
+                result.push(val);
+                ctx.update(val);
+            } else {
+                dec.advance(p_pm1, PROB_SCALE - p_pm1);
+                let negative = dec.get_bit();
+                // Exp-Golomb order 0 decoding
+                let mut prefix_zeros: u32 = 0;
+                loop {
+                    if dec.get_bit() { break; }
+                    prefix_zeros += 1;
+                }
+                let mut n1: u32 = 1 << prefix_zeros;
+                for b in (0..prefix_zeros).rev() {
+                    if dec.get_bit() { n1 |= 1 << b; }
+                }
+                let mag = n1 - 1 + 2;
+                let val = if negative { -(mag as i16) } else { mag as i16 };
+                result.push(val);
+                ctx.update(val);
+            }
+        }
+    }
+
+    (result, dec.pos())
+}
+
+// ======================================================================
+// RLE Pre-Transform (separate layer before rANS)
+// ======================================================================
+
+/// Convert AC coefficients into RLE pairs: [run0, level0, run1, level1, ...]
+/// run = number of preceding zeros (as i16, always >= 0)
+/// level = non-zero coefficient value
+/// Returns: (rle_symbols, n_pairs)
+pub fn ac_to_rle(coeffs: &[i16]) -> (Vec<i16>, usize) {
+    let mut symbols = Vec::new();
+    let mut run: i16 = 0;
+    let mut n_pairs = 0usize;
+    for &val in coeffs {
+        if val == 0 {
+            run += 1;
+        } else {
+            symbols.push(run);  // run length
+            symbols.push(val);  // non-zero value
+            run = 0;
+            n_pairs += 1;
+        }
+    }
+    (symbols, n_pairs)
+}
+
+/// Expand RLE symbols back into AC coefficients.
+/// `rle_symbols`: [run0, level0, run1, level1, ...]
+/// `n_coeffs`: total number of output coefficients (with trailing zeros)
+pub fn rle_to_ac(rle_symbols: &[i16], n_coeffs: usize) -> Vec<i16> {
+    let mut result = Vec::with_capacity(n_coeffs);
+    let mut i = 0;
+    while i + 1 < rle_symbols.len() {
+        let run = rle_symbols[i].max(0) as usize;
+        let level = rle_symbols[i + 1];
+        for _ in 0..run {
+            result.push(0);
+        }
+        result.push(level);
+        i += 2;
+    }
+    // Pad with trailing zeros
+    while result.len() < n_coeffs {
+        result.push(0);
+    }
+    result.truncate(n_coeffs);
+    result
 }
 
 // ======================================================================
@@ -1202,5 +1817,146 @@ mod tests {
             compressed.len(),
             input.len()
         );
+    }
+
+    // ==================================================================
+    // v11 hyper-sparse rANS tests
+    // ==================================================================
+
+    #[test]
+    fn test_rans_v11_roundtrip_basic() {
+        let input: Vec<i16> = vec![0, 1, -1, 0, 0, 2, -3, 0, 0, 0, 1, 0, -1, 5, 0];
+        let encoded = rans_encode_band_v11(&input);
+        let (decoded, _bytes) = rans_decode_band_v11(&encoded, input.len());
+        assert_eq!(input, decoded, "v11 basic roundtrip failed");
+    }
+
+    #[test]
+    fn test_rans_v11_roundtrip_empty() {
+        let input: Vec<i16> = vec![];
+        let encoded = rans_encode_band_v11(&input);
+        assert!(encoded.is_empty());
+        let (decoded, _) = rans_decode_band_v11(&encoded, 0);
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_rans_v11_roundtrip_all_zeros() {
+        let input = vec![0i16; 1000];
+        let encoded = rans_encode_band_v11(&input);
+        let (decoded, _) = rans_decode_band_v11(&encoded, input.len());
+        assert_eq!(input, decoded);
+        assert!(encoded.len() < 100, "v11 all-zeros compressed to {} bytes", encoded.len());
+    }
+
+    #[test]
+    fn test_rans_v11_roundtrip_all_ones() {
+        let input = vec![1i16; 500];
+        let encoded = rans_encode_band_v11(&input);
+        let (decoded, _) = rans_decode_band_v11(&encoded, input.len());
+        assert_eq!(input, decoded);
+    }
+
+    #[test]
+    fn test_rans_v11_roundtrip_large_values() {
+        let input: Vec<i16> = vec![0, 0, 10, -20, 0, 0, 0, 100, 0, -50, 0, 0, 200, -200];
+        let encoded = rans_encode_band_v11(&input);
+        let (decoded, _) = rans_decode_band_v11(&encoded, input.len());
+        assert_eq!(input, decoded, "v11 large values roundtrip failed");
+    }
+
+    #[test]
+    fn test_rans_v11_hyper_sparse() {
+        // 99% zeros with scattered nonzero values — long zero runs.
+        // v11 with 6 run-class buckets should beat v8's 4 buckets.
+        let n = 10000;
+        let mut input = Vec::with_capacity(n);
+        let mut rng: u64 = 42;
+        for _ in 0..n {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let r = ((rng >> 33) as u32) % 100;
+            if r < 99 {
+                input.push(0i16);
+            } else {
+                input.push(((rng >> 16) as i16) % 5 + 1);
+            }
+        }
+
+        let encoded_v8 = rans_encode_band(&input);
+        let encoded_v11 = rans_encode_band_v11(&input);
+
+        // Verify v11 roundtrip
+        let (decoded, _) = rans_decode_band_v11(&encoded_v11, input.len());
+        assert_eq!(input, decoded, "v11 hyper-sparse roundtrip failed");
+
+        // v11 should compress at least as well as v8 on hyper-sparse data
+        assert!(
+            encoded_v11.len() <= encoded_v8.len(),
+            "v11 ({} bytes) should be <= v8 ({} bytes) on hyper-sparse data",
+            encoded_v11.len(), encoded_v8.len()
+        );
+    }
+
+    #[test]
+    fn test_rans_v11_stress() {
+        let patterns: Vec<Vec<i16>> = vec![
+            vec![0; 100],
+            vec![1; 100],
+            vec![-1; 100],
+            (0..100).map(|i| if i % 2 == 0 { 0 } else { 1 }).collect(),
+            (0..100).map(|i| (i % 7 - 3) as i16).collect(),
+            (0..200).map(|i| if i < 180 { 0 } else { (i - 180) as i16 + 2 }).collect(),
+            vec![0, 0, 0, 30, 0, 0, 0, -30, 0, 0],
+        ];
+
+        for (idx, pattern) in patterns.iter().enumerate() {
+            let encoded = rans_encode_band_v11(pattern);
+            let (decoded, _) = rans_decode_band_v11(&encoded, pattern.len());
+            assert_eq!(pattern, &decoded, "v11 stress pattern {} failed", idx);
+        }
+    }
+
+    #[test]
+    fn test_rans_v8_backward_compat() {
+        // Verify old v8 functions produce deterministic output (regression guard)
+        let input: Vec<i16> = vec![0, 1, -1, 0, 0, 2, -3, 0, 0, 0, 1, 0, -1, 5, 0];
+        let enc1 = rans_encode_band(&input);
+        let enc2 = rans_encode_band(&input);
+        assert_eq!(enc1, enc2, "v8 encoding changed (backward compat broken)");
+        let (dec, _) = rans_decode_band(&enc1, input.len());
+        assert_eq!(input, dec, "v8 decode changed (backward compat broken)");
+    }
+
+    // ==================================================================
+    // v12 context model tests
+    // ==================================================================
+
+    #[test]
+    fn test_context_model_v12_bucket_indexing() {
+        let mut cm = ContextModelV12::new();
+        cm.set_turing_level(0);
+        let idx0 = cm.zero_ctx_index();
+        cm.set_turing_level(3);
+        let idx3 = cm.zero_ctx_index();
+        assert_ne!(idx0, idx3);
+        assert!(idx0 < N_CTX_ZERO_V12);
+        assert!(idx3 < N_CTX_ZERO_V12);
+    }
+
+    #[test]
+    fn test_context_model_v12_symmetry_with_v11() {
+        let cm = ContextModelV12::new();
+        let p_zero_calm = cm.p_zero[0];
+        assert!(p_zero_calm > 12000, "default P(zero) should be ~85%: {p_zero_calm}");
+    }
+
+    #[test]
+    fn test_context_model_v12_update() {
+        let mut cm = ContextModelV12::new();
+        cm.set_turing_level(2);
+        let before = cm.p_zero[cm.zero_ctx_index()];
+        cm.update(0); // zero symbol → should increase p_zero
+        let after = cm.p_zero[cm.zero_ctx_index()];
+        assert!(after >= before, "zero symbol should increase P(zero)");
     }
 }

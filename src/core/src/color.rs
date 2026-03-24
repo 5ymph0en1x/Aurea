@@ -1,5 +1,7 @@
 /// YCbCr <-> RGB conversion (ITU-R BT.601) and 4:2:0 subsampling.
 
+use rayon::prelude::*;
+
 /// Convert a YCbCr pixel to RGB, returns (R, G, B) clipped to [0, 255].
 #[inline]
 pub fn ycbcr_to_rgb_pixel(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
@@ -14,13 +16,13 @@ pub fn ycbcr_to_rgb_pixel(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
 /// Convert a YCbCr image (H, W, 3) to RGB (H, W, 3).
 /// The Y, Cb, Cr planes are passed separately as f64.
 pub fn ycbcr_to_rgb(y_plane: &[f64], cb_plane: &[f64], cr_plane: &[f64], len: usize) -> Vec<u8> {
-    let mut rgb = Vec::with_capacity(len * 3);
-    for i in 0..len {
+    let mut rgb = vec![0u8; len * 3];
+    rgb.par_chunks_mut(3).enumerate().for_each(|(i, chunk)| {
         let (r, g, b) = ycbcr_to_rgb_pixel(y_plane[i], cb_plane[i], cr_plane[i]);
-        rgb.push(r);
-        rgb.push(g);
-        rgb.push(b);
-    }
+        chunk[0] = r;
+        chunk[1] = g;
+        chunk[2] = b;
+    });
     rgb
 }
 
@@ -33,7 +35,7 @@ pub fn upsample_420(channel: &[f64], hc: usize, wc: usize, target_h: usize, targ
     let scale_y = if target_h > 1 { (hc as f64 - 1.0) / (target_h as f64 - 1.0) } else { 0.0 };
     let scale_x = if target_w > 1 { (wc as f64 - 1.0) / (target_w as f64 - 1.0) } else { 0.0 };
 
-    for y in 0..target_h {
+    result.par_chunks_mut(target_w).enumerate().for_each(|(y, row)| {
         let sy = y as f64 * scale_y;
         let iy0 = (sy as usize).min(hc - 1);
         let iy1 = (iy0 + 1).min(hc - 1);
@@ -50,33 +52,40 @@ pub fn upsample_420(channel: &[f64], hc: usize, wc: usize, target_h: usize, targ
             let v10 = channel[iy1 * wc + ix0];
             let v11 = channel[iy1 * wc + ix1];
 
-            let v = v00 * (1.0 - dy) * (1.0 - dx)
-                  + v01 * (1.0 - dy) * dx
-                  + v10 * dy * (1.0 - dx)
-                  + v11 * dy * dx;
-
-            result[y * target_w + x] = v;
+            row[x] = v00 * (1.0 - dy) * (1.0 - dx)
+                   + v01 * (1.0 - dy) * dx
+                   + v10 * dy * (1.0 - dx)
+                   + v11 * dy * dx;
         }
-    }
+    });
 
     result
 }
 
 /// RGB -> YCbCr BT.601 conversion. Returns 3 planes (Y, Cb, Cr) as f64.
 pub fn rgb_to_ycbcr_planes(rgb: &[u8], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let mut y = Vec::with_capacity(n);
-    let mut cb = Vec::with_capacity(n);
-    let mut cr = Vec::with_capacity(n);
+    let mut y = vec![0.0f64; n];
+    let mut cb = vec![0.0f64; n];
+    let mut cr = vec![0.0f64; n];
 
-    for i in 0..n {
-        let r = rgb[i * 3] as f64;
-        let g = rgb[i * 3 + 1] as f64;
-        let b = rgb[i * 3 + 2] as f64;
-
-        y.push((0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 255.0));
-        cb.push((-0.169 * r - 0.331 * g + 0.500 * b + 128.0).clamp(0.0, 255.0));
-        cr.push((0.500 * r - 0.419 * g - 0.081 * b + 128.0).clamp(0.0, 255.0));
-    }
+    // Process in chunks for rayon
+    let chunk_size = (n / rayon::current_num_threads().max(1)).max(4096);
+    y.par_chunks_mut(chunk_size)
+        .zip(cb.par_chunks_mut(chunk_size))
+        .zip(cr.par_chunks_mut(chunk_size))
+        .enumerate()
+        .for_each(|(chunk_idx, ((y_chunk, cb_chunk), cr_chunk))| {
+            let start = chunk_idx * chunk_size;
+            for j in 0..y_chunk.len() {
+                let i = start + j;
+                let r = rgb[i * 3] as f64;
+                let g = rgb[i * 3 + 1] as f64;
+                let b = rgb[i * 3 + 2] as f64;
+                y_chunk[j] = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 255.0);
+                cb_chunk[j] = (-0.169 * r - 0.331 * g + 0.500 * b + 128.0).clamp(0.0, 255.0);
+                cr_chunk[j] = (0.500 * r - 0.419 * g - 0.081 * b + 128.0).clamp(0.0, 255.0);
+            }
+        });
 
     (y, cb, cr)
 }
@@ -134,22 +143,30 @@ pub fn subsample_420_encode(channel: &[f64], h: usize, w: usize) -> (Vec<f64>, u
 /// the inverse uses only phi^-1 and phi^-2 (Fibonacci sequence).
 pub fn golden_rotate_forward(rgb: &[u8], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     use crate::golden::{PHI, PHI_INV};
-    let norm = 1.0 / (2.0 * PHI); // 1/(2phi) so the weights sum to 1
+    let norm = 1.0 / (2.0 * PHI);
 
-    let mut l = Vec::with_capacity(n);
-    let mut c1 = Vec::with_capacity(n);
-    let mut c2 = Vec::with_capacity(n);
+    let mut l = vec![0.0f64; n];
+    let mut c1 = vec![0.0f64; n];
+    let mut c2 = vec![0.0f64; n];
 
-    for i in 0..n {
-        let r = rgb[i * 3] as f64;
-        let g = rgb[i * 3 + 1] as f64;
-        let b = rgb[i * 3 + 2] as f64;
-
-        let lum = (r + PHI * g + PHI_INV * b) * norm;
-        l.push(lum);
-        c1.push(b - lum);
-        c2.push(r - lum);
-    }
+    let chunk_size = (n / rayon::current_num_threads().max(1)).max(4096);
+    l.par_chunks_mut(chunk_size)
+        .zip(c1.par_chunks_mut(chunk_size))
+        .zip(c2.par_chunks_mut(chunk_size))
+        .enumerate()
+        .for_each(|(chunk_idx, ((l_chunk, c1_chunk), c2_chunk))| {
+            let start = chunk_idx * chunk_size;
+            for j in 0..l_chunk.len() {
+                let i = start + j;
+                let r = rgb[i * 3] as f64;
+                let g = rgb[i * 3 + 1] as f64;
+                let b = rgb[i * 3 + 2] as f64;
+                let lum = (r + PHI * g + PHI_INV * b) * norm;
+                l_chunk[j] = lum;
+                c1_chunk[j] = b - lum;
+                c2_chunk[j] = r - lum;
+            }
+        });
 
     (l, c1, c2)
 }
@@ -158,15 +175,24 @@ pub fn golden_rotate_forward(rgb: &[u8], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f
 pub fn golden_rotate_inverse(l: &[f64], c1: &[f64], c2: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     use crate::golden::{PHI_INV, PHI_INV2};
 
-    let mut r = Vec::with_capacity(n);
-    let mut g = Vec::with_capacity(n);
-    let mut b = Vec::with_capacity(n);
+    let mut r = vec![0.0f64; n];
+    let mut g = vec![0.0f64; n];
+    let mut b = vec![0.0f64; n];
 
-    for i in 0..n {
-        r.push(l[i] + c2[i]);
-        g.push(l[i] - PHI_INV2 * c1[i] - PHI_INV * c2[i]);
-        b.push(l[i] + c1[i]);
-    }
+    let chunk_size = (n / rayon::current_num_threads().max(1)).max(4096);
+    r.par_chunks_mut(chunk_size)
+        .zip(g.par_chunks_mut(chunk_size))
+        .zip(b.par_chunks_mut(chunk_size))
+        .enumerate()
+        .for_each(|(chunk_idx, ((r_chunk, g_chunk), b_chunk))| {
+            let start = chunk_idx * chunk_size;
+            for j in 0..r_chunk.len() {
+                let i = start + j;
+                r_chunk[j] = l[i] + c2[i];
+                g_chunk[j] = l[i] - PHI_INV2 * c1[i] - PHI_INV * c2[i];
+                b_chunk[j] = l[i] + c1[i];
+            }
+        });
 
     (r, g, b)
 }
@@ -365,7 +391,7 @@ pub fn downsample_2d(
     let scale_y = if dst_h > 1 { (src_h as f64 - 1.0) / (dst_h as f64 - 1.0) } else { 0.0 };
     let scale_x = if dst_w > 1 { (src_w as f64 - 1.0) / (dst_w as f64 - 1.0) } else { 0.0 };
 
-    for y in 0..dst_h {
+    result.par_chunks_mut(dst_w).enumerate().for_each(|(y, row)| {
         let sy = y as f64 * scale_y;
         let iy0 = (sy as usize).min(src_h.saturating_sub(1));
         let iy1 = (iy0 + 1).min(src_h.saturating_sub(1));
@@ -375,13 +401,12 @@ pub fn downsample_2d(
             let ix0 = (sx as usize).min(src_w.saturating_sub(1));
             let ix1 = (ix0 + 1).min(src_w.saturating_sub(1));
             let dx = sx - ix0 as f64;
-            result[y * dst_w + x] =
-                data[iy0 * src_w + ix0] * (1.0 - dy) * (1.0 - dx)
-              + data[iy0 * src_w + ix1] * (1.0 - dy) * dx
-              + data[iy1 * src_w + ix0] * dy * (1.0 - dx)
-              + data[iy1 * src_w + ix1] * dy * dx;
+            row[x] = data[iy0 * src_w + ix0] * (1.0 - dy) * (1.0 - dx)
+                   + data[iy0 * src_w + ix1] * (1.0 - dy) * dx
+                   + data[iy1 * src_w + ix0] * dy * (1.0 - dx)
+                   + data[iy1 * src_w + ix1] * dy * dx;
         }
-    }
+    });
     result
 }
 

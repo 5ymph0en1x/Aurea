@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# AUREA v10 codec installation for Windows
+# AUREA v12 codec installation for Windows
 # - Removes any previous codec (XTS, Echo, old AUREA)
 # - Native thumbnails in Explorer
 # - File association (double-click)
@@ -152,7 +152,7 @@ $VbsPath = "$InstallDir\convert.vbs"
 Dim exe, src
 exe = "$InstallDir\aurea.exe"
 src = WScript.Arguments(0)
-CreateObject("WScript.Shell").Run """" & exe & """ encode """ & src & """ -q 85", 0, True
+CreateObject("WScript.Shell").Run """" & exe & """ encode """ & src & """ -q 50", 0, True
 "@ | Set-Content -Path $VbsPath -Encoding ASCII
 
 Write-Host "  OK" -ForegroundColor Green

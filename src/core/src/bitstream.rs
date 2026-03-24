@@ -674,6 +674,88 @@ pub fn parse_aur2_header(data: &[u8]) -> io::Result<(Aur2Header, usize)> {
     }, 39))
 }
 
+// ======================================================================
+// AUR2 v5: ADN5 hexagonal header extension
+// ======================================================================
+
+/// AUR2 v5 hexagonal header (6 bytes, appended after base Aur2Header).
+#[derive(Debug, Clone)]
+pub struct HexHeader {
+    pub hex_radius: u8,
+    pub hex_cols: u16,
+    pub hex_rows: u16,
+    pub reserved: u8,
+}
+
+pub fn write_hex_header(hdr: &HexHeader) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(6);
+    buf.push(hdr.hex_radius);
+    buf.extend_from_slice(&hdr.hex_cols.to_le_bytes());
+    buf.extend_from_slice(&hdr.hex_rows.to_le_bytes());
+    buf.push(hdr.reserved);
+    buf
+}
+
+pub fn parse_hex_header(data: &[u8]) -> std::io::Result<HexHeader> {
+    if data.len() < 6 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "hex header too short"));
+    }
+    Ok(HexHeader {
+        hex_radius: data[0],
+        hex_cols: u16::from_le_bytes([data[1], data[2]]),
+        hex_rows: u16::from_le_bytes([data[3], data[4]]),
+        reserved: data[5],
+    })
+}
+
+// ======================================================================
+// AUR2 v12: Turing morphogenesis header extension
+// ======================================================================
+
+/// v12 Turing parameters appended after flags when FLAG_BAYESIAN_HIERARCHY is set.
+#[derive(Debug, Clone)]
+pub struct TuringHeader {
+    pub sigma_a: f32,
+    pub sigma_ratio: f32,
+    pub k_step: f32,
+    pub mag_calibration: f32,
+}
+
+impl TuringHeader {
+    pub fn default_params() -> Self {
+        Self {
+            sigma_a: crate::calibration::TURING_SIGMA_A as f32,
+            sigma_ratio: crate::calibration::TURING_SIGMA_RATIO as f32,
+            k_step: crate::calibration::TURING_K_STEP as f32,
+            mag_calibration: crate::calibration::TURING_MAG_CALIBRATION as f32,
+        }
+    }
+
+    pub fn write(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(16);
+        buf.extend_from_slice(&self.sigma_a.to_le_bytes());
+        buf.extend_from_slice(&self.sigma_ratio.to_le_bytes());
+        buf.extend_from_slice(&self.k_step.to_le_bytes());
+        buf.extend_from_slice(&self.mag_calibration.to_le_bytes());
+        buf
+    }
+
+    pub fn parse(data: &[u8]) -> std::io::Result<(Self, usize)> {
+        if data.len() < 16 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "not enough data for TuringHeader",
+            ));
+        }
+        Ok((Self {
+            sigma_a: f32::from_le_bytes(data[0..4].try_into().unwrap()),
+            sigma_ratio: f32::from_le_bytes(data[4..8].try_into().unwrap()),
+            k_step: f32::from_le_bytes(data[8..12].try_into().unwrap()),
+            mag_calibration: f32::from_le_bytes(data[12..16].try_into().unwrap()),
+        }, 16))
+    }
+}
+
 #[cfg(test)]
 mod aur2_tests {
     use super::*;
@@ -717,5 +799,23 @@ mod aur2_tests {
     fn test_aur2_header_reject_short() {
         let data = b"AUR2".to_vec();  // only 4 bytes, need 39
         assert!(parse_aur2_header(&data).is_err());
+    }
+
+    #[test]
+    fn test_turing_header_roundtrip() {
+        let hdr = TuringHeader {
+            sigma_a: 1.5,
+            sigma_ratio: 2.618,
+            k_step: 0.5,
+            mag_calibration: 1.2,
+        };
+        let bytes = hdr.write();
+        assert_eq!(bytes.len(), 16);
+        let (parsed, consumed) = TuringHeader::parse(&bytes).unwrap();
+        assert_eq!(consumed, 16);
+        assert!((parsed.sigma_a - 1.5).abs() < 1e-6);
+        assert!((parsed.sigma_ratio - 2.618).abs() < 1e-3);
+        assert!((parsed.k_step - 0.5).abs() < 1e-6);
+        assert!((parsed.mag_calibration - 1.2).abs() < 1e-6);
     }
 }

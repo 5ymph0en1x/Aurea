@@ -302,18 +302,224 @@ pub fn directional_sharpen(y: &mut [f64], h: usize, w: usize, strength: f64) {
 }
 
 // ======================================================================
-// Chaperone multi-échelle (Ribosome passe 3)
+// Ternary supercordes sharpening (ADN4 decoder-side)
 // ======================================================================
 
-/// Propage l'énergie des niveaux wavelet profonds vers les niveaux fins
-/// pour reconstruire la micro-texture seuillée dans les zones sombres.
+/// Ternary supercordes classification per block.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Supercorde {
+    /// No structure — flat/noise region. Don't touch.
+    Rien,
+    /// Linear structure — edge with dominant direction. Sharpen perpendicular.
+    Segment { angle_rad: f64 },
+    /// Curved/mixed structure — no single direction. Sharpen isotropically.
+    Arc,
+}
+
+/// Classify each block in the DC grid as Segment, Arc, or Rien.
+/// Uses DC gradient magnitude and directionality.
+/// Identical in encoder and decoder (pure DC grid computation).
+pub fn supercordes_classify(
+    dc_grid: &[f64], grid_h: usize, grid_w: usize,
+) -> Vec<Supercorde> {
+    let n = grid_h * grid_w;
+    if n == 0 { return Vec::new(); }
+
+    // Compute per-block gradient: dx, dy from DC neighbors
+    let mut classes = vec![Supercorde::Rien; n];
+    let mut magnitudes = vec![0.0f64; n];
+
+    for gy in 0..grid_h {
+        for gx in 0..grid_w {
+            let idx = gy * grid_w + gx;
+            let dc = dc_grid[idx];
+
+            // Central differences (mirror at boundaries)
+            let left  = if gx > 0 { dc_grid[gy * grid_w + gx - 1] } else { dc };
+            let right = if gx + 1 < grid_w { dc_grid[gy * grid_w + gx + 1] } else { dc };
+            let top   = if gy > 0 { dc_grid[(gy - 1) * grid_w + gx] } else { dc };
+            let bot   = if gy + 1 < grid_h { dc_grid[(gy + 1) * grid_w + gx] } else { dc };
+
+            let dx = (right - left) * 0.5;
+            let dy = (bot - top) * 0.5;
+            let raw_mag = (dx * dx + dy * dy).sqrt();
+            // Weber-Fechner: scale gradient by inverse luminance.
+            // Dark areas (dc=20): gradient×10 amplification → subtle texture detected.
+            // Bright areas (dc=200): gradient×1.2 → only strong edges matter.
+            let weber = 255.0 / (dc.abs() + 25.0); // +25 avoids div/0, caps at ~10×
+            magnitudes[idx] = raw_mag * weber;
+        }
+    }
+
+    // Median magnitude = threshold between structure and rien
+    let mut sorted_mag = magnitudes.clone();
+    sorted_mag.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let median_mag = sorted_mag[sorted_mag.len() / 2].max(0.5);
+
+    for gy in 0..grid_h {
+        for gx in 0..grid_w {
+            let idx = gy * grid_w + gx;
+            let mag = magnitudes[idx];
+
+            if mag < median_mag * 0.5 {
+                // Below half the median: RIEN (no structure)
+                classes[idx] = Supercorde::Rien;
+            } else {
+                // Structural block: check directionality
+                let dc = dc_grid[idx];
+                let left  = if gx > 0 { dc_grid[gy * grid_w + gx - 1] } else { dc };
+                let right = if gx + 1 < grid_w { dc_grid[gy * grid_w + gx + 1] } else { dc };
+                let top   = if gy > 0 { dc_grid[(gy - 1) * grid_w + gx] } else { dc };
+                let bot   = if gy + 1 < grid_h { dc_grid[(gy + 1) * grid_w + gx] } else { dc };
+
+                let dx = (right - left) * 0.5;
+                let dy = (bot - top) * 0.5;
+
+                // Anisotropy: how dominant is one direction?
+                let abs_dx = dx.abs();
+                let abs_dy = dy.abs();
+                let dominant = abs_dx.max(abs_dy);
+                let minor = abs_dx.min(abs_dy);
+
+                if dominant > minor * 2.0 {
+                    // Strong anisotropy: SEGMENT (edge with direction)
+                    let angle = dy.atan2(dx); // gradient direction
+                    classes[idx] = Supercorde::Segment { angle_rad: angle };
+                } else {
+                    // Isotropic structure: ARC (curve, corner, texture)
+                    classes[idx] = Supercorde::Arc;
+                }
+            }
+        }
+    }
+    classes
+}
+
+/// Ternary supercordes sharpening: decoder-side, zero bpp cost.
+/// - Rien: no sharpening (preserve smoothness, don't amplify noise)
+/// - Segment: directional unsharp mask perpendicular to edge
+/// - Arc: isotropic unsharp mask
 ///
-/// Principe (Track-Before-Detect radar): un coefficient non-zéro au niveau
-/// profond est une PREUVE de signal. Au niveau fin, si le coefficient
-/// correspondant est zéro (seuillé), la chaperonne injecte une estimation
-/// atténuée par PHI_INV, plafonnée au demi-pas codon local.
+/// Strength is gentle (phi^-2 ≈ 0.38) to avoid ringing.
+pub fn supercordes_sharpen(
+    plane: &mut [f64], h: usize, w: usize,
+    dc_grid: &[f64], grid_h: usize, grid_w: usize,
+    block_size: usize,
+    strength: f64,
+) {
+    if h < 3 || w < 3 || grid_h < 2 || grid_w < 2 { return; }
+
+    let classes = supercordes_classify(dc_grid, grid_h, grid_w);
+
+    // Compute blurred version for unsharp mask
+    let blurred = gaussian_blur(plane, h, w);
+
+    let src = plane.to_vec();
+    let hi = h as i32;
+    let wi = w as i32;
+
+    for y in 1..h-1 {
+        let gy = (y / block_size).min(grid_h - 1);
+        for x in 1..w-1 {
+            let gx = (x / block_size).min(grid_w - 1);
+            let class = classes[gy * grid_w + gx];
+
+            match class {
+                Supercorde::Rien => {
+                    // No sharpening. Crystal clear = don't touch what's already clean.
+                }
+                Supercorde::Segment { angle_rad } => {
+                    // Sharpen perpendicular to the edge direction.
+                    // Edge direction = angle_rad. Sharpen direction = angle_rad + pi/2.
+                    let perp = angle_rad + std::f64::consts::FRAC_PI_2;
+                    let cos_p = perp.cos();
+                    let sin_p = perp.sin();
+
+                    // Sample 2 pixels along perpendicular direction
+                    let x1 = reflect((x as f64 + cos_p).round() as i32, wi) as usize;
+                    let y1 = reflect((y as f64 + sin_p).round() as i32, hi) as usize;
+                    let x2 = reflect((x as f64 - cos_p).round() as i32, wi) as usize;
+                    let y2 = reflect((y as f64 - sin_p).round() as i32, hi) as usize;
+
+                    // Directional Laplacian: 2*center - neighbor1 - neighbor2
+                    let center = src[y * w + x];
+                    let laplacian = 2.0 * center - src[y1 * w + x1] - src[y2 * w + x2];
+
+                    // Unsharp: add scaled Laplacian (sharpens perpendicular to edge)
+                    plane[y * w + x] = (center + strength * 0.5 * laplacian).clamp(0.0, 255.0);
+                }
+                Supercorde::Arc => {
+                    // Isotropic unsharp mask: enhance all directions equally
+                    let detail = src[y * w + x] - blurred[y * w + x];
+                    plane[y * w + x] = (src[y * w + x] + strength * detail).clamp(0.0, 255.0);
+                }
+            }
+        }
+    }
+}
+
+// ======================================================================
+// Multi-scale chaperone (Ribosome pass 3)
+// ======================================================================
+
+/// Propagates energy from deep wavelet levels to fine levels
+/// to reconstruct micro-texture thresholded in dark regions.
 ///
-/// Opère sur les sous-bandes L AVANT recomposition wavelet.
+/// Principle (Track-Before-Detect radar): a non-zero coefficient at the
+/// deep level is PROOF of signal. At the fine level, if the coefficient
+// ======================================================================
+// Quantum collapse: Schrodinger rendering (float -> u8 with error diffusion)
+// ======================================================================
+
+/// Schrödinger collapse: converts a floating-point plane to u8 using
+/// Floyd-Steinberg error diffusion. Each pixel's rounding error is
+/// propagated to its neighbors, preserving perceptual gradients.
+///
+/// This is the "measurement" step: the continuous superposition of
+/// possible values collapses into a single certain value, informed
+/// by the quantum state of the neighborhood.
+///
+/// Applied as the LAST step before RGB output — after all reconstruction,
+/// inverse PTF, and inverse GCT.
+pub fn schrodinger_collapse(plane: &[f64], h: usize, w: usize) -> Vec<u8> {
+    let mut buf: Vec<f64> = plane.to_vec();
+    let mut out = vec![0u8; h * w];
+
+    for y in 0..h {
+        for x in 0..w {
+            let old = buf[y * w + x].clamp(0.0, 255.0);
+            let new = old.round().clamp(0.0, 255.0);
+            let error = old - new;
+            out[y * w + x] = new as u8;
+
+            // Floyd-Steinberg diffusion: propagate error to 4 neighbors
+            //   [·] [7]
+            // [3] [5] [1]  (divided by 16)
+            if x + 1 < w {
+                buf[y * w + x + 1] += error * 7.0 / 16.0;
+            }
+            if y + 1 < h {
+                if x > 0 {
+                    buf[(y + 1) * w + x - 1] += error * 3.0 / 16.0;
+                }
+                buf[(y + 1) * w + x] += error * 5.0 / 16.0;
+                if x + 1 < w {
+                    buf[(y + 1) * w + x + 1] += error * 1.0 / 16.0;
+                }
+            }
+        }
+    }
+    out
+}
+
+// ======================================================================
+// Multi-scale chaperone (Ribosome pass 3)
+// ======================================================================
+
+/// is zero (thresholded), the chaperone injects an attenuated estimate
+/// scaled by PHI_INV, capped at half the local codon step.
+///
+/// Operates on L subbands BEFORE wavelet recomposition.
 pub fn chaperone_multiscale(
     l_subs: &mut [(ndarray::Array2<f64>, ndarray::Array2<f64>, ndarray::Array2<f64>)],
     steps_l: &[[f64; 3]],
@@ -329,7 +535,7 @@ pub fn chaperone_multiscale(
 
     if wv_levels < 2 { return; }
 
-    // Du profond vers le fin: propagation de l'évidence
+    // Deep to fine: evidence propagation
     for lv in (0..wv_levels - 1).rev() {
         let deep_lv = lv + 1;
 
@@ -983,10 +1189,13 @@ pub fn deblock_gas_only(plane: &mut [f64], h: usize, w: usize, block_size: usize
                          && boundary_step > grad_left.max(grad_right);
 
             if is_gas {
-                // [1,2,1]/4 blend only on the 2 boundary pixels
+                // Weber-adaptive blend: stronger in dark areas where blocking is more visible.
+                // Dark (pixel~20): blend ≈ 0.85 (aggressive). Bright (pixel~200): blend ≈ 0.38.
+                let lum = (p_left.abs() + p_right.abs()) * 0.5;
+                let weber_blend = (BLEND + (1.0 - BLEND) * (1.0 - lum / 255.0)).min(0.95);
                 let mid = (p_left + p_right) * 0.5;
-                plane[y * w + bx - 1] = p_left  + BLEND * (mid - p_left);
-                plane[y * w + bx]     = p_right + BLEND * (mid - p_right);
+                plane[y * w + bx - 1] = p_left  + weber_blend * (mid - p_left);
+                plane[y * w + bx]     = p_right + weber_blend * (mid - p_right);
             }
         }
     }
@@ -1013,11 +1222,200 @@ pub fn deblock_gas_only(plane: &mut [f64], h: usize, w: usize, block_size: usize
                          && boundary_step > grad_top.max(grad_bot);
 
             if is_gas {
+                let lum = (p_top.abs() + p_bottom.abs()) * 0.5;
+                let weber_blend = (BLEND + (1.0 - BLEND) * (1.0 - lum / 255.0)).min(0.95);
                 let mid = (p_top + p_bottom) * 0.5;
-                plane[(by - 1) * w + x] = p_top    + BLEND * (mid - p_top);
-                plane[by * w + x]       = p_bottom + BLEND * (mid - p_bottom);
+                plane[(by - 1) * w + x] = p_top    + weber_blend * (mid - p_top);
+                plane[by * w + x]       = p_bottom + weber_blend * (mid - p_bottom);
             }
         }
+    }
+}
+
+// ==========================================================================
+// Post-decode sharpening (CASP + Adaptive)
+// ==========================================================================
+
+/// CASP (Contrast Adaptive Sharpening) — unsharp mask with Gaussian blur,
+/// edge-adaptive strength to prevent halos.
+///
+/// sigma: blur radius in pixels (1.5-3.0 for HD images).
+/// strength: sharpening amount (0.5 = subtle, 1.0 = visible, 2.0 = aggressive).
+pub fn casp_sharpen(plane: &mut [f64], h: usize, w: usize, strength: f64) {
+    if strength <= 0.0 || h < 3 || w < 3 {
+        return;
+    }
+    let src = plane.to_vec();
+
+    // Gaussian blur radius scales with image size for visible effect
+    let sigma = if h.max(w) > 2000 { 2.0 } else if h.max(w) > 1000 { 1.5 } else { 1.0 };
+    let blurred = gaussian_blur_2d(&src, h, w, sigma);
+
+    // Sobel edge magnitude for adaptive control
+    let mut edge = vec![0.0f64; h * w];
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let gx = (src[(y - 1) * w + x + 1] + 2.0 * src[y * w + x + 1] + src[(y + 1) * w + x + 1])
+                   - (src[(y - 1) * w + x - 1] + 2.0 * src[y * w + x - 1] + src[(y + 1) * w + x - 1]);
+            let gy = (src[(y + 1) * w + x - 1] + 2.0 * src[(y + 1) * w + x] + src[(y + 1) * w + x + 1])
+                   - (src[(y - 1) * w + x - 1] + 2.0 * src[(y - 1) * w + x] + src[(y - 1) * w + x + 1]);
+            edge[y * w + x] = (gx * gx + gy * gy).sqrt();
+        }
+    }
+    let max_edge = edge.iter().cloned().fold(1.0f64, f64::max);
+    let inv_max = 1.0 / max_edge;
+
+    // Unsharp mask: output = src + strength * (src - blurred) * edge_attenuation
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            let detail = src[idx] - blurred[idx];
+            // Attenuate near strong edges (prevent halos), boost in smooth areas
+            let edge_norm = (edge[idx] * inv_max).min(1.0);
+            let atten = 1.0 - edge_norm * 0.7; // retain 30% sharpening even at edges
+            plane[idx] = (src[idx] + strength * atten * detail).clamp(0.0, 255.0);
+        }
+    }
+}
+
+/// Separable Gaussian blur for dsp module (self-contained).
+fn gaussian_blur_2d(input: &[f64], h: usize, w: usize, sigma: f64) -> Vec<f64> {
+    if sigma < 0.01 { return input.to_vec(); }
+    let radius = (3.0 * sigma).ceil() as usize;
+    let ks = 2 * radius + 1;
+
+    // Build normalized 1D kernel
+    let inv_2s2 = 1.0 / (2.0 * sigma * sigma);
+    let mut kernel = Vec::with_capacity(ks);
+    let mut sum = 0.0;
+    for i in 0..ks {
+        let d = i as f64 - radius as f64;
+        let v = (-d * d * inv_2s2).exp();
+        kernel.push(v);
+        sum += v;
+    }
+    for k in &mut kernel { *k /= sum; }
+
+    // Horizontal pass
+    let mut temp = vec![0.0; h * w];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0;
+            for k in 0..ks {
+                let xx = (x as i64 + k as i64 - radius as i64).clamp(0, w as i64 - 1) as usize;
+                acc += kernel[k] * input[y * w + xx];
+            }
+            temp[y * w + x] = acc;
+        }
+    }
+
+    // Vertical pass
+    let mut output = vec![0.0; h * w];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0;
+            for k in 0..ks {
+                let yy = (y as i64 + k as i64 - radius as i64).clamp(0, h as i64 - 1) as usize;
+                acc += kernel[k] * temp[yy * w + x];
+            }
+            output[y * w + x] = acc;
+        }
+    }
+    output
+}
+
+/// Adaptive sharpening: edge-aware unsharp mask.
+///
+/// Computes a Sobel edge mask, then applies an unsharp mask whose strength
+/// is *reduced* near strong edges (avoids halo/ringing) and *increased*
+/// in smooth areas (recovers lost detail from quantization).
+pub fn adaptive_sharpen(plane: &mut [f64], h: usize, w: usize, strength: f64, _edge_threshold: f64) {
+    if strength <= 0.0 || h < 3 || w < 3 {
+        return;
+    }
+    let src = plane.to_vec();
+
+    // 1. Sobel edge magnitude
+    let mut edge = vec![0.0f64; h * w];
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let gx = (src[(y - 1) * w + x + 1] + 2.0 * src[y * w + x + 1] + src[(y + 1) * w + x + 1])
+                   - (src[(y - 1) * w + x - 1] + 2.0 * src[y * w + x - 1] + src[(y + 1) * w + x - 1]);
+            let gy = (src[(y + 1) * w + x - 1] + 2.0 * src[(y + 1) * w + x] + src[(y + 1) * w + x + 1])
+                   - (src[(y - 1) * w + x - 1] + 2.0 * src[(y - 1) * w + x] + src[(y - 1) * w + x + 1]);
+            edge[y * w + x] = (gx * gx + gy * gy).sqrt();
+        }
+    }
+
+    // Normalize edge map to [0, 1]
+    let max_edge = edge.iter().cloned().fold(0.0f64, f64::max);
+    if max_edge > 0.0 {
+        let inv = 1.0 / max_edge;
+        for e in edge.iter_mut() {
+            *e *= inv;
+        }
+    }
+
+    // 2. Blur the edge mask (simple 3×3 box blur for speed)
+    let mut edge_blur = vec![0.0f64; h * w];
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0.0;
+            let mut cnt = 0.0;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let ny = y as i32 + dy;
+                    let nx = x as i32 + dx;
+                    if ny >= 0 && ny < h as i32 && nx >= 0 && nx < w as i32 {
+                        sum += edge[ny as usize * w + nx as usize];
+                        cnt += 1.0;
+                    }
+                }
+            }
+            edge_blur[y * w + x] = sum / cnt;
+        }
+    }
+
+    // 3. Compute low-pass (3×3 box blur of source)
+    let mut blurred = vec![0.0f64; h * w];
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0.0;
+            let mut cnt = 0.0;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let ny = y as i32 + dy;
+                    let nx = x as i32 + dx;
+                    if ny >= 0 && ny < h as i32 && nx >= 0 && nx < w as i32 {
+                        sum += src[ny as usize * w + nx as usize];
+                        cnt += 1.0;
+                    }
+                }
+            }
+            blurred[y * w + x] = sum / cnt;
+        }
+    }
+
+    // 4. Unsharp mask modulated by inverse edge strength
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            let detail = src[idx] - blurred[idx];
+            // More sharpening in smooth areas, less at edges
+            let factor = strength * (1.0 - edge_blur[idx]);
+            plane[idx] = (src[idx] + factor * detail).clamp(0.0, 255.0);
+        }
+    }
+}
+
+/// Apply post-decode sharpening based on mode.
+/// mode: 0=off, 1=unsharp (directional_sharpen), 2=CASP, 3=adaptive
+pub fn post_sharpen(plane: &mut [f64], h: usize, w: usize, mode: u8, strength: f64) {
+    match mode {
+        1 => directional_sharpen(plane, h, w, strength),
+        2 => casp_sharpen(plane, h, w, strength),
+        3 => adaptive_sharpen(plane, h, w, strength, 0.2),
+        _ => {} // 0 or unknown = off
     }
 }
 

@@ -1,12 +1,12 @@
 #Requires -RunAsAdministrator
-# AUREA v10 codec uninstallation for Windows
+# AUREA v12 codec uninstallation for Windows
 # Also removes legacy codecs (XTS, Echo, old AUREA)
 
 $ErrorActionPreference = "SilentlyContinue"
 
 $WicDecoderCatid = "{7ED96837-96F0-4812-B211-F13C24117ED3}"
 
-Write-Host "=== AUREA v10 Uninstallation ===" -ForegroundColor Yellow
+Write-Host "=== AUREA v12 Uninstallation ===" -ForegroundColor Yellow
 Write-Host ""
 
 # 1. Stop Explorer to release DLLs
@@ -56,7 +56,7 @@ if ((Test-Path $EchoDir) -or (Test-Path "HKLM:\SOFTWARE\Classes\.echo")) {
     $cleaned += "Echo"
 }
 
-# --- AUREA (v10 + old) ---
+# --- AUREA (v12 + old) ---
 $AureaDir = "C:\Program Files\aurea"
 $AureaClsidThumb = "{267A0E00-C0DE-4ABC-9DEF-000000267011}"
 $AureaClsidWic = "{267A0E00-C0DE-4ABC-9DEF-000000267012}"

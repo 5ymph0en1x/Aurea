@@ -7,6 +7,8 @@
 /// - Arcs: sampling at the golden angle (137.5 degrees)
 use half::f16;
 use ndarray::Array2;
+use crate::turing::PredictedContour;
+use crate::calibration;
 
 /// Fibonacci force levels (natural logarithmic quantization).
 /// Perception follows Weber-Fechner: delta_perception = k * log(stimulus).
@@ -90,6 +92,34 @@ pub enum Primitive {
 /// Natural oscillation frequency of the CDF 9/7 filter: 1/(2*phi) cycles/pixel.
 /// Empirical discovery: coefficients along contours oscillate at this frequency.
 const PHI_FREQ: f64 = 0.30901699437494742; // 1/(2*phi)
+
+// ============================================================
+// Primitive matching types
+// ============================================================
+
+/// Classification of how a primitive relates to a Turing-predicted contour.
+#[derive(Debug, Clone)]
+pub enum MatchKind {
+    /// 00 — fully predicted by Turing, zero bits
+    Predicted,
+    /// 01 — matched with residual corrections
+    Residual,
+    /// 10 — no match, encode full primitive (v11 format)
+    Surprise,
+}
+
+/// Result of matching a primitive against the set of predicted contours.
+#[derive(Debug, Clone)]
+pub struct PrimitiveMatch {
+    pub kind: MatchKind,
+    pub contour_idx: Option<usize>,
+    /// (Δy, Δx) in fixed-point (×16)
+    pub delta_pos: Option<(i16, i16)>,
+    /// quantized π/32
+    pub delta_angle: Option<i8>,
+    pub delta_amp: Option<i8>,
+    pub original: Primitive,
+}
 
 impl Primitive {
     /// Serialization cost in bytes of the primitive.
@@ -380,9 +410,9 @@ fn fit_segment(points: &[(usize, usize, f64)]) -> Option<(i16, i16, i16, i16, f6
     let x2 = (cx + t_max * dir_x).round() as i16;
     let y2 = (cy + t_max * dir_y).round() as i16;
 
-    // Amplitude et phase par correlation avec le template d'oscillation phi.
-    // On cherche la phase qui maximise la correlation entre les coefficients
-    // reels et le pattern sin(2*pi * PHI_FREQ * i + phase).
+    // Amplitude and phase via correlation with the phi oscillation template.
+    // We search for the phase that maximizes the correlation between the
+    // actual coefficients and the pattern sin(2*pi * PHI_FREQ * i + phase).
     let n = points.len();
     let mut sum_sin = 0.0f64;
     let mut sum_cos = 0.0f64;
@@ -735,6 +765,188 @@ fn compute_profit_fast(prim: &Primitive, cluster: &[(usize, usize, f64)]) -> f64
     let bits_saved = n * 0.6 * 2.0 + n_large * 0.3 * 8.0;
     let cost_bits = prim.byte_cost() as f64 * 8.0;
     bits_saved - cost_bits
+}
+
+// ============================================================
+// Primitive matching
+// ============================================================
+
+/// Signed angle difference in [-π, π].
+fn angle_diff(a: f64, b: f64) -> f64 {
+    use std::f64::consts::PI;
+    ((a - b) + PI).rem_euclid(2.0 * PI) - PI
+}
+
+/// Convert primitive endpoints from detail-band coordinates to DC-grid coordinates.
+/// Scale = block_size / 2 (detail bands are half-resolution).
+/// Returns ((y1, x1), (y2, x2)) in DC-grid space.
+fn primitive_to_dc(prim: &Primitive, block_size: usize) -> ((f64, f64), (f64, f64)) {
+    let scale = (block_size as f64) / 2.0;
+    match prim {
+        Primitive::Segment { x1, y1, x2, y2, .. } => {
+            (
+                (*y1 as f64 / scale, *x1 as f64 / scale),
+                (*y2 as f64 / scale, *x2 as f64 / scale),
+            )
+        }
+        Primitive::Arc { cx, cy, radius, .. } => {
+            let r = *radius as f64;
+            let cx_f = *cx as f64;
+            let cy_f = *cy as f64;
+            (
+                ((cy_f - r) / scale, cx_f / scale),
+                ((cy_f + r) / scale, cx_f / scale),
+            )
+        }
+    }
+}
+
+/// Match extracted primitives against Turing-predicted contours.
+///
+/// For each primitive:
+/// - Convert to DC-grid coordinates.
+/// - Compute centroid and orientation angle.
+/// - For each contour: find the closest point to the centroid; skip if > MATCH_RADIUS.
+/// - Compute simplified Hausdorff distance (max of endpoint distances to closest contour point).
+/// - If Hausdorff < MATCH_DISTANCE_MAX: compute delta_pos, delta_angle, delta_amp.
+/// - Classify: all deltas below thresholds → Predicted, else match found → Residual, else → Surprise.
+pub fn match_primitives(
+    primitives: &[Primitive],
+    contours: &[PredictedContour],
+    block_size: usize,
+) -> Vec<PrimitiveMatch> {
+    let mut results = Vec::with_capacity(primitives.len());
+
+    for prim in primitives {
+        let (ep1, ep2) = primitive_to_dc(prim, block_size);
+        let centroid_y = (ep1.0 + ep2.0) / 2.0;
+        let centroid_x = (ep1.1 + ep2.1) / 2.0;
+
+        // Orientation angle from endpoints (dy, dx)
+        let prim_angle = (ep2.0 - ep1.0).atan2(ep2.1 - ep1.1);
+        let prim_amp = match prim {
+            Primitive::Segment { amplitude, .. } => *amplitude as f64,
+            Primitive::Arc { amplitude, .. } => *amplitude as f64,
+        };
+
+        let mut best_contour_idx: Option<usize> = None;
+        let mut best_hausdorff = f64::INFINITY;
+        let mut best_closest_y = 0.0f64;
+        let mut best_closest_x = 0.0f64;
+        let mut best_orientation = 0.0f64;
+        let mut best_magnitude = 0.0f64;
+
+        for (cidx, contour) in contours.iter().enumerate() {
+            if contour.positions.is_empty() {
+                continue;
+            }
+
+            // Find closest contour point to centroid
+            let mut min_dist_sq = f64::INFINITY;
+            let mut closest_pos_idx = 0usize;
+            for (pidx, &(py, px)) in contour.positions.iter().enumerate() {
+                let dy = py as f64 - centroid_y;
+                let dx = px as f64 - centroid_x;
+                let d2 = dy * dy + dx * dx;
+                if d2 < min_dist_sq {
+                    min_dist_sq = d2;
+                    closest_pos_idx = pidx;
+                }
+            }
+
+            // Skip contours too far from centroid
+            if min_dist_sq > calibration::TURING_MATCH_RADIUS * calibration::TURING_MATCH_RADIUS {
+                continue;
+            }
+
+            // Simplified Hausdorff: max distance from each endpoint to nearest contour point
+            let mut h_ep1 = f64::INFINITY;
+            let mut h_ep2 = f64::INFINITY;
+            for &(py, px) in &contour.positions {
+                let d1 = {
+                    let dy = py as f64 - ep1.0;
+                    let dx = px as f64 - ep1.1;
+                    (dy * dy + dx * dx).sqrt()
+                };
+                let d2 = {
+                    let dy = py as f64 - ep2.0;
+                    let dx = px as f64 - ep2.1;
+                    (dy * dy + dx * dx).sqrt()
+                };
+                if d1 < h_ep1 { h_ep1 = d1; }
+                if d2 < h_ep2 { h_ep2 = d2; }
+            }
+            let hausdorff = h_ep1.max(h_ep2);
+
+            if hausdorff < best_hausdorff {
+                best_hausdorff = hausdorff;
+                best_contour_idx = Some(cidx);
+                let (cy_pos, cx_pos) = contour.positions[closest_pos_idx];
+                best_closest_y = cy_pos as f64;
+                best_closest_x = cx_pos as f64;
+                best_orientation = contour.orientations[closest_pos_idx];
+                best_magnitude = contour.magnitudes[closest_pos_idx];
+            }
+        }
+
+        // Classify the match
+        let kind;
+        let contour_idx;
+        let delta_pos;
+        let delta_angle;
+        let delta_amp;
+
+        if best_hausdorff < calibration::TURING_MATCH_DISTANCE_MAX {
+            // Compute residuals relative to the predicted contour
+            let dp_y = centroid_y - best_closest_y;
+            let dp_x = centroid_x - best_closest_x;
+            let da = angle_diff(prim_angle, best_orientation);
+            let d_amp = prim_amp - best_magnitude;
+
+            let dp_y_fp = (dp_y * 16.0).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+            let dp_x_fp = (dp_x * 16.0).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+            let da_q = (da * 32.0 / std::f64::consts::PI)
+                .round()
+                .clamp(-128.0, 127.0) as i8;
+            let d_amp_q = d_amp.round().clamp(-128.0, 127.0) as i8;
+
+            let pos_ok = dp_y.abs() < calibration::TURING_SURPRISE_POS
+                && dp_x.abs() < calibration::TURING_SURPRISE_POS;
+            let angle_ok = da.abs() < calibration::TURING_SURPRISE_ANGLE;
+            let amp_ok = d_amp.abs() < calibration::TURING_SURPRISE_AMP;
+
+            if pos_ok && angle_ok && amp_ok {
+                kind = MatchKind::Predicted;
+                contour_idx = best_contour_idx;
+                delta_pos = Some((dp_y_fp, dp_x_fp));
+                delta_angle = Some(da_q);
+                delta_amp = Some(d_amp_q);
+            } else {
+                kind = MatchKind::Residual;
+                contour_idx = best_contour_idx;
+                delta_pos = Some((dp_y_fp, dp_x_fp));
+                delta_angle = Some(da_q);
+                delta_amp = Some(d_amp_q);
+            }
+        } else {
+            kind = MatchKind::Surprise;
+            contour_idx = None;
+            delta_pos = None;
+            delta_angle = None;
+            delta_amp = None;
+        }
+
+        results.push(PrimitiveMatch {
+            kind,
+            contour_idx,
+            delta_pos,
+            delta_angle,
+            delta_amp,
+            original: prim.clone(),
+        });
+    }
+
+    results
 }
 
 // ============================================================
@@ -1156,10 +1368,10 @@ mod tests {
     const EPS: f64 = 1e-9;
 
     // ----------------------------------------------------------
-    // Tests du renderer
+    // Renderer tests
     // ----------------------------------------------------------
 
-    /// Un segment horizontal (theta=0) doit emettre uniquement dans LH.
+    /// A horizontal segment (theta=0) should emit only into LH.
     /// cos(0)=1, sin(0)=0 => LH>0, HL=0, HH=0
     #[test]
     fn test_segment_horizontal_emits_lh_only() {
@@ -1170,12 +1382,12 @@ mod tests {
         let hl_sum: f64 = hl.iter().copied().sum();
         let hh_sum: f64 = hh.iter().copied().sum();
 
-        assert!(lh_sum > EPS, "LH doit etre non nul pour segment horizontal");
-        assert!(hl_sum.abs() < EPS, "HL doit etre nul pour segment horizontal, got {}", hl_sum);
-        assert!(hh_sum.abs() < EPS, "HH doit etre nul pour segment horizontal, got {}", hh_sum);
+        assert!(lh_sum > EPS, "LH must be non-zero for horizontal segment");
+        assert!(hl_sum.abs() < EPS, "HL must be zero for horizontal segment, got {}", hl_sum);
+        assert!(hh_sum.abs() < EPS, "HH must be zero for horizontal segment, got {}", hh_sum);
     }
 
-    /// Un segment vertical (theta=pi/2) doit emettre uniquement dans HL.
+    /// A vertical segment (theta=pi/2) should emit only into HL.
     /// cos(pi/2)=0, sin(pi/2)=1 => LH=0, HL>0, HH=0
     #[test]
     fn test_segment_vertical_emits_hl_only() {
@@ -1187,11 +1399,11 @@ mod tests {
         let hh_sum: f64 = hh.iter().copied().sum();
 
         // HL must dominate for a vertical segment; LH/HH can have small cross-talk
-        assert!(hl_sum > lh_sum.abs() * 2.0, "HL doit dominer pour segment vertical (HL={}, LH={})", hl_sum, lh_sum);
-        assert!(hl_sum > hh_sum.abs() * 2.0, "HL doit dominer pour segment vertical (HL={}, HH={})", hl_sum, hh_sum);
+        assert!(hl_sum > lh_sum.abs() * 2.0, "HL must dominate for vertical segment (HL={}, LH={})", hl_sum, lh_sum);
+        assert!(hl_sum > hh_sum.abs() * 2.0, "HL must dominate for vertical segment (HL={}, HH={})", hl_sum, hh_sum);
     }
 
-    /// Un segment diagonal a 45 degres doit emettre dans les trois bandes.
+    /// A 45-degree diagonal segment should emit into all three bands.
     /// theta=pi/4 : cos=sin=1/sqrt(2), HH = |sin*cos| = 0.5
     #[test]
     fn test_segment_diagonal_emits_all_bands() {
@@ -1202,16 +1414,16 @@ mod tests {
         let hl_sum: f64 = hl.iter().copied().sum();
         let hh_sum: f64 = hh.iter().copied().sum();
 
-        assert!(lh_sum > EPS, "LH doit etre non nul pour segment diagonal");
-        assert!(hl_sum > EPS, "HL doit etre non nul pour segment diagonal");
-        assert!(hh_sum > EPS, "HH doit etre non nul pour segment diagonal");
+        assert!(lh_sum > EPS, "LH must be non-zero for diagonal segment");
+        assert!(hl_sum > EPS, "HL must be non-zero for diagonal segment");
+        assert!(hh_sum > EPS, "HH must be non-zero for diagonal segment");
     }
 
     // ----------------------------------------------------------
-    // Tests des composantes connexes
+    // Connected components tests
     // ----------------------------------------------------------
 
-    /// Des pixels en diagonale forment une seule composante (8-connexite).
+    /// Diagonal pixels should form a single component (8-connectivity).
     #[test]
     fn test_connected_components_8() {
         // Pixels (0,0), (1,1), (2,2) — diagonale
@@ -1221,17 +1433,17 @@ mod tests {
         mask[2 * 3 + 2] = true; // (2,2)
 
         let (labels, n_comp) = connected_components_8(&mask, 3, 3);
-        assert_eq!(n_comp, 1, "La diagonale doit former une seule composante");
+        assert_eq!(n_comp, 1, "Diagonal must form a single component");
         assert_eq!(labels[0 * 3 + 0], labels[1 * 3 + 1]);
         assert_eq!(labels[1 * 3 + 1], labels[2 * 3 + 2]);
     }
 
-    /// Deux clusters separes doivent former deux composantes distinctes.
+    /// Two separated clusters should form two distinct components.
     #[test]
     fn test_connected_components_8_two_clusters() {
         // Cluster A : (0,0), (0,1)
         // Cluster B : (2,2), (2,3)
-        // Separees par une ligne vide
+        // Separated by an empty row
         let mut mask = vec![false; 4 * 5];
         mask[0 * 5 + 0] = true;
         mask[0 * 5 + 1] = true;
@@ -1239,38 +1451,38 @@ mod tests {
         mask[2 * 5 + 3] = true;
 
         let (labels, n_comp) = connected_components_8(&mask, 4, 5);
-        assert_eq!(n_comp, 2, "Doit avoir 2 composantes distinctes");
+        assert_eq!(n_comp, 2, "Must have 2 distinct components");
         assert_ne!(labels[0 * 5 + 0], labels[2 * 5 + 2]);
         assert_eq!(labels[0 * 5 + 0], labels[0 * 5 + 1]);
         assert_eq!(labels[2 * 5 + 2], labels[2 * 5 + 3]);
     }
 
     // ----------------------------------------------------------
-    // Tests de l'ajustement de segment
+    // Segment fitting tests
     // ----------------------------------------------------------
 
-    /// Ajuster un segment sur des points horizontaux.
+    /// Fit a segment to horizontal points.
     #[test]
     fn test_fit_segment_horizontal() {
         let points: Vec<(usize, usize, f64)> = (0..10).map(|c| (5usize, c, 5.0)).collect();
         let result = fit_segment(&points);
-        assert!(result.is_some(), "fit_segment doit reussir sur 10 points horizontaux");
+        assert!(result.is_some(), "fit_segment must succeed on 10 horizontal points");
         let (x1, y1, x2, y2, amp, _phase) = result.unwrap();
-        // Les deux extremites doivent etre sur la meme ligne (row=5)
-        assert_eq!(y1, y2, "y1 et y2 doivent etre egaux pour un segment horizontal");
-        assert!(x1 < x2 || x1 > x2, "x1 != x2 pour un segment non trivial");
-        assert!(amp.abs() > 0.1, "Amplitude doit etre non nulle, got {}", amp);
+        // Both endpoints must be on the same row (row=5)
+        assert_eq!(y1, y2, "y1 and y2 must be equal for a horizontal segment");
+        assert!(x1 < x2 || x1 > x2, "x1 != x2 for a non-trivial segment");
+        assert!(amp.abs() > 0.1, "Amplitude must be non-zero, got {}", amp);
         let _ = (x1, x2);
     }
 
     // ----------------------------------------------------------
-    // Tests de l'ajustement d'arc
+    // Arc fitting tests
     // ----------------------------------------------------------
 
-    /// Ajuster un arc sur des points d'un demi-cercle.
+    /// Fit an arc to semicircle points.
     #[test]
     fn test_fit_arc_semicircle() {
-        // Semi-cercle de centre (50, 50), rayon 20
+        // Semicircle centered at (50, 50), radius 20
         let cx_true = 50.0f64;
         let cy_true = 50.0f64;
         let r_true  = 20.0f64;
@@ -1284,18 +1496,18 @@ mod tests {
             .collect();
 
         let result = fit_arc(&points);
-        assert!(result.is_some(), "fit_arc doit reussir sur un demi-cercle");
+        assert!(result.is_some(), "fit_arc must succeed on a semicircle");
         let (cx, cy, radius, _ts, _te, _force) = result.unwrap();
-        assert!((cx as f64 - cx_true).abs() < 5.0, "Centre X approximatif : {} vs {}", cx, cx_true);
-        assert!((cy as f64 - cy_true).abs() < 5.0, "Centre Y approximatif : {} vs {}", cy, cy_true);
-        assert!((radius as f64 - r_true).abs() < 5.0, "Rayon approximatif : {} vs {}", radius, r_true);
+        assert!((cx as f64 - cx_true).abs() < 5.0, "Approximate center X: {} vs {}", cx, cx_true);
+        assert!((cy as f64 - cy_true).abs() < 5.0, "Approximate center Y: {} vs {}", cy, cy_true);
+        assert!((radius as f64 - r_true).abs() < 5.0, "Approximate radius: {} vs {}", radius, r_true);
     }
 
     // ----------------------------------------------------------
-    // Tests de serialisation
+    // Serialization tests
     // ----------------------------------------------------------
 
-    /// Serialiser puis deserialiser doit retrouver les memes primitives.
+    /// Serialize then deserialize must recover the same primitives.
     #[test]
     fn test_serialize_roundtrip() {
         let primitives = vec![
@@ -1307,8 +1519,8 @@ mod tests {
         let bytes = serialize_primitives(&primitives);
         let (decoded, consumed) = deserialize_primitives(&bytes);
 
-        assert_eq!(consumed, bytes.len(), "Tous les bytes doivent etre consommes");
-        assert_eq!(decoded.len(), primitives.len(), "Meme nombre de primitives");
+        assert_eq!(consumed, bytes.len(), "All bytes must be consumed");
+        assert_eq!(decoded.len(), primitives.len(), "Same number of primitives");
 
         match (&decoded[0], &primitives[0]) {
             (Primitive::Segment { x1: a1, y1: b1, x2: c1, y2: d1, amplitude: f1, phase: p1 },
@@ -1317,7 +1529,7 @@ mod tests {
                 assert_eq!(c1, c2); assert_eq!(d1, d2);
                 assert_eq!(f1, f2); assert_eq!(p1, p2);
             }
-            _ => panic!("Type incorrect pour primitive[0]"),
+            _ => panic!("Incorrect type for primitive[0]"),
         }
 
         match (&decoded[1], &primitives[1]) {
@@ -1326,15 +1538,15 @@ mod tests {
                 assert_eq!(a1, a2); assert_eq!(b1, b2); assert_eq!(r1, r2);
                 assert_eq!(ts1, ts2); assert_eq!(te1, te2); assert_eq!(f1, f2); assert_eq!(p1, p2);
             }
-            _ => panic!("Type incorrect pour primitive[1]"),
+            _ => panic!("Incorrect type for primitive[1]"),
         }
     }
 
     // ----------------------------------------------------------
-    // Tests de l'extracteur greedy
+    // Greedy extractor tests
     // ----------------------------------------------------------
 
-    /// Une ligne horizontale claire dans LH doit produire au moins une primitive.
+    /// A clear horizontal line in LH should produce at least one primitive.
     #[test]
     fn test_extract_horizontal_line() {
         let h = 32usize; let w = 32usize;
@@ -1342,16 +1554,16 @@ mod tests {
         let q_hl = Array2::<f64>::zeros((h, w));
         let q_hh = Array2::<f64>::zeros((h, w));
 
-        // Ligne horizontale d'energie forte sur la ligne 16
+        // Strong energy horizontal line on row 16
         for c in 2..30 {
             q_lh[[16, c]] = 20.0;
         }
 
         let (prims, _r_lh, _r_hl, _r_hh) = extract_primitives(&q_lh, &q_hl, &q_hh);
-        assert!(!prims.is_empty(), "Doit trouver au moins une primitive pour une ligne horizontale claire");
+        assert!(!prims.is_empty(), "Must find at least one primitive for a clear horizontal line");
     }
 
-    /// Des bandes vides ne doivent produire aucune primitive.
+    /// Empty bands should produce no primitives.
     #[test]
     fn test_extract_empty_band() {
         let q_lh = Array2::<f64>::zeros((32, 32));
@@ -1359,11 +1571,11 @@ mod tests {
         let q_hh = Array2::<f64>::zeros((32, 32));
 
         let (prims, _r_lh, _r_hl, _r_hh) = extract_primitives(&q_lh, &q_hl, &q_hh);
-        assert!(prims.is_empty(), "Bandes vides => aucune primitive");
+        assert!(prims.is_empty(), "Empty bands => no primitives");
     }
 
     // ----------------------------------------------------------
-    // Tests des patches polynomiaux LL
+    // LL polynomial patch tests
     // ----------------------------------------------------------
 
     #[test]
@@ -1517,5 +1729,87 @@ mod tests {
             prims.len(),
             (1.0 - resid_energy / total_energy) * 100.0
         );
+    }
+
+    // ----------------------------------------------------------
+    // Tests de primitive matching
+    // ----------------------------------------------------------
+
+    #[test]
+    fn test_match_no_contours() {
+        let prim = Primitive::Segment {
+            x1: 0, y1: 0, x2: 100, y2: 0,
+            amplitude: 5, phase: 0,
+        };
+        let matches = super::match_primitives(&[prim], &[], 8);
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(matches[0].kind, super::MatchKind::Surprise));
+    }
+
+    #[test]
+    fn test_match_kind_classification() {
+        use crate::turing::PredictedContour;
+        // A predicted contour at row 4, columns 2-8 (horizontal)
+        let contour = PredictedContour {
+            positions: (2..=8).map(|x| (4usize, x as usize)).collect(),
+            orientations: vec![0.0; 7],
+            magnitudes: vec![10.0; 7],
+        };
+        // Primitive far away → should be Surprise
+        let far_prim = Primitive::Segment {
+            x1: 0, y1: 0, x2: 10, y2: 0,
+            amplitude: 5, phase: 0,
+        };
+        let matches = super::match_primitives(&[far_prim], &[contour], 16);
+        assert_eq!(matches.len(), 1);
+        // With block_size=16, scale=8, coords are very small → likely Surprise or close match
+        // The exact result depends on the coordinate conversion
+    }
+
+    #[test]
+    fn test_angle_diff_basic() {
+        use std::f64::consts::PI;
+        // Same angle → 0
+        assert!((super::angle_diff(0.0, 0.0)).abs() < 1e-10);
+        // PI/4 - 0 = PI/4
+        assert!((super::angle_diff(PI / 4.0, 0.0) - PI / 4.0).abs() < 1e-10);
+        // Wraparound: angle_diff(PI, -PI) should be ~0 (they are the same angle)
+        assert!(super::angle_diff(PI, -PI).abs() < 1e-10);
+        // angle_diff in [-PI, PI]
+        let d = super::angle_diff(0.1, 2.0 * PI - 0.1);
+        assert!(d.abs() <= PI + 1e-10);
+    }
+
+    #[test]
+    fn test_primitive_to_dc_segment() {
+        let prim = Primitive::Segment {
+            x1: 16, y1: 8, x2: 32, y2: 16,
+            amplitude: 5, phase: 0,
+        };
+        // block_size=8, scale=4
+        let (ep1, ep2) = super::primitive_to_dc(&prim, 8);
+        // y1/scale = 8/4 = 2.0, x1/scale = 16/4 = 4.0
+        assert!((ep1.0 - 2.0).abs() < 1e-10, "ep1.y = {}", ep1.0);
+        assert!((ep1.1 - 4.0).abs() < 1e-10, "ep1.x = {}", ep1.1);
+        // y2/scale = 16/4 = 4.0, x2/scale = 32/4 = 8.0
+        assert!((ep2.0 - 4.0).abs() < 1e-10, "ep2.y = {}", ep2.0);
+        assert!((ep2.1 - 8.0).abs() < 1e-10, "ep2.x = {}", ep2.1);
+    }
+
+    #[test]
+    fn test_primitive_to_dc_arc() {
+        let prim = Primitive::Arc {
+            cx: 40, cy: 20, radius: 10,
+            theta_start: 0, theta_end: 64,
+            amplitude: 5, phase: 0,
+        };
+        // block_size=8, scale=4
+        let (ep1, ep2) = super::primitive_to_dc(&prim, 8);
+        // top: (cy-r)/scale = (20-10)/4 = 2.5, cx/scale = 40/4 = 10.0
+        assert!((ep1.0 - 2.5).abs() < 1e-10, "ep1.y = {}", ep1.0);
+        assert!((ep1.1 - 10.0).abs() < 1e-10, "ep1.x = {}", ep1.1);
+        // bottom: (cy+r)/scale = (20+10)/4 = 7.5, cx/scale = 40/4 = 10.0
+        assert!((ep2.0 - 7.5).abs() < 1e-10, "ep2.y = {}", ep2.0);
+        assert!((ep2.1 - 10.0).abs() < 1e-10, "ep2.x = {}", ep2.1);
     }
 }

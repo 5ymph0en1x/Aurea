@@ -1,22 +1,22 @@
-/// Module A.D.N. - Séquençage Géométrique par Polymérase
-/// Remplace la détection de primitives PCA/Taubin par un parcours guidé par les codons.
+/// A.D.N. module — Geometric sequencing by polymerase.
+/// Replaces PCA/Taubin primitive detection with a codon-guided traversal.
 
 use ndarray::Array2;
 use crate::golden::PHI;
 use crate::rans;
 
-/// Énergies discrètes des bases nucléotidiques
+/// Discrete energy levels of nucleotide bases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Nucleobase {
-    A = 0, // Forte énergie positive (> PHI)
-    C = 1, // Faible énergie positive (0.5 à PHI)
-    G = 2, // Faible énergie négative (-PHI à -0.5)
-    T = 3, // Forte énergie négative (< -PHI)
-    Intron = 4, // Dead-zone (zéro)
+    A = 0, // Strong positive energy (> PHI)
+    C = 1, // Weak positive energy (0.5 to PHI)
+    G = 2, // Weak negative energy (-PHI to -0.5)
+    T = 3, // Strong negative energy (< -PHI)
+    Intron = 4, // Dead-zone (zero)
 }
 
 impl Nucleobase {
-    /// Convertit un coefficient continu en base nucléotidique
+    /// Converts a continuous coefficient to a nucleotide base.
     pub fn from_f64(val: f64, step: f64) -> Self {
         let n = val / step;
         if n.abs() < 0.5 { return Nucleobase::Intron; }
@@ -26,12 +26,12 @@ impl Nucleobase {
         else { Nucleobase::T }
     }
 
-    /// Traduit la base nucléotidique en énergie reconstituée (f64)
-    /// Utilise les centroïdes optimaux d'une distribution Laplacienne
+    /// Decodes the nucleotide base back to a reconstructed energy value (f64).
+    /// Uses the optimal centroids of a Laplacian distribution.
     pub fn decode_f64(&self, step: f64) -> f64 {
         let n = match self {
-            Nucleobase::A => PHI + 1.0,  // PHI^2 = 2.618 (centroide Laplacien optimal [PHI, +inf])
-            Nucleobase::C => 0.96,      // Centroide Laplacien optimal [0.5, PHI]
+            Nucleobase::A => PHI + 1.0,  // PHI^2 = 2.618 (optimal Laplacian centroid [PHI, +inf])
+            Nucleobase::C => 0.96,       // Optimal Laplacian centroid [0.5, PHI]
             Nucleobase::G => -0.96,
             Nucleobase::T => -(PHI + 1.0),
             Nucleobase::Intron => 0.0,
@@ -39,7 +39,7 @@ impl Nucleobase {
         n * step
     }
 
-    /// Magnitude absolue pour calculer l'orientation géométrique
+    /// Absolute magnitude for computing the geometric orientation.
     pub fn vector_weight(&self) -> f64 {
         match self {
             Nucleobase::A | Nucleobase::T => 2.0,
@@ -49,8 +49,8 @@ impl Nucleobase {
     }
 }
 
-/// Un Codon est un triplet inter-bandes (LH, HL, HH).
-/// Il y a 5^3 = 125 combinaisons possibles d'états d'énergie spatiale.
+/// A Codon is an inter-band triplet (LH, HL, HH).
+/// There are 5^3 = 125 possible spatial energy state combinations.
 #[derive(Debug, Clone, Copy)]
 pub struct Codon {
     pub lh: Nucleobase,
@@ -59,12 +59,12 @@ pub struct Codon {
 }
 
 impl Codon {
-    /// Convertit le Codon en un "Acide Aminé" (un octet entre 0 et 124)
+    /// Converts the Codon to an "Amino Acid" (a byte between 0 and 124).
     pub fn to_amino_acid(&self) -> u8 {
         (self.lh as u8) * 25 + (self.hl as u8) * 5 + (self.hh as u8)
     }
 
-    /// Reconstruit un Codon depuis un Acide Aminé (0 - 124)
+    /// Reconstructs a Codon from an Amino Acid (0 - 124).
     pub fn from_amino_acid(aa: u8) -> Self {
         let lh_val = aa / 25;
         let hl_val = (aa % 25) / 5;
@@ -78,7 +78,7 @@ impl Codon {
         Codon { lh: to_base(lh_val), hl: to_base(hl_val), hh: to_base(hh_val) }
     }
 
-    /// La "boussole" de la polymérase. Indique l'orientation de la crête.
+    /// The polymerase "compass". Indicates the ridge orientation.
     pub fn propagation_vector(&self) -> (f64, f64) {
         let w_lh = self.lh.vector_weight();
         let w_hl = self.hl.vector_weight();
@@ -102,15 +102,15 @@ impl Codon {
     }
 }
 
-/// Gène : Séquence d'information codant un contour géométrique.
+/// Gene: Information sequence encoding a geometric contour.
 pub struct Gene {
     pub start_x: u16,
     pub start_y: u16,
-    pub sequence: Vec<Codon>, // La séquence détermine le tracé exact
+    pub sequence: Vec<Codon>, // The sequence determines the exact path
 }
 
 impl Gene {
-    /// Re-simule le parcours de la polymérase pour "traduire" le gène en pixels.
+    /// Re-simulates the polymerase traversal to "translate" the gene into pixels.
     pub fn translate_path(&self) -> Vec<(usize, usize)> {
         let mut cx = self.start_x as f64;
         let mut cy = self.start_y as f64;
@@ -126,15 +126,15 @@ impl Gene {
 
             let (mut dx, mut dy) = codon.propagation_vector();
 
-            // Momentum : Garantir que la polymérase avance toujours vers l'avant
-            // et ne fait pas d'allers-retours sur place.
+            // Momentum: ensure the polymerase always moves forward
+            // and never oscillates back and forth.
             if prev_dx != 0.0 || prev_dy != 0.0 {
                 if dx * prev_dx + dy * prev_dy < 0.0 {
                     dx = -dx;
                     dy = -dy;
                 }
             } else if dx == 0.0 && dy == 0.0 {
-                dx = 1.0; // Fallback initial
+                dx = 1.0; // Initial fallback
             }
 
             prev_dx = dx;
@@ -147,7 +147,7 @@ impl Gene {
 }
 
 // =====================================================================
-// Transcription & Élongation
+// Transcription & Elongation
 // =====================================================================
 
 fn transcribe_mrna(lh: &Array2<f64>, hl: &Array2<f64>, hh: &Array2<f64>, step: f64) -> Array2<Codon> {
@@ -166,7 +166,7 @@ fn transcribe_mrna(lh: &Array2<f64>, hl: &Array2<f64>, hh: &Array2<f64>, step: f
     mrna
 }
 
-/// Tolérance d'Introns traversés avant arrêt (pont ADN).
+/// Maximum number of introns crossed before stopping (DNA bridge).
 const INTRON_BRIDGE: usize = 2;
 
 fn sequence_genes(mrna: &mut Array2<Codon>) -> Vec<Gene> {
@@ -201,8 +201,8 @@ fn sequence_genes(mrna: &mut Array2<Codon>) -> Vec<Gene> {
                 if codon.is_intron() {
                     intron_run += 1;
                     if intron_run > INTRON_BRIDGE { break; }
-                    // Pont Intron : on stocke l'Intron dans la séquence
-                    // (énergie zéro, rANS le comprime quasi-gratuitement)
+                    // Intron bridge: store the intron in the sequence
+                    // (zero energy, rANS compresses it nearly for free)
                     current_gene.sequence.push(intron);
                 } else {
                     intron_run = 0;
@@ -224,14 +224,14 @@ fn sequence_genes(mrna: &mut Array2<Codon>) -> Vec<Gene> {
                 cx += dx; cy += dy;
             }
 
-            // Élaguer les Introns terminaux
+            // Prune trailing introns
             while current_gene.sequence.last().map_or(false, |c| c.is_intron()) {
                 current_gene.sequence.pop();
             }
 
-            // Filtre de viabilité : longueur + énergie
+            // Viability filter: minimum length + energy
             if current_gene.sequence.len() >= 16 {
-                // Au moins 2 codons à forte énergie (A ou T) pour justifier le coût
+                // At least 2 high-energy codons (A or T) to justify the cost
                 let strong_count = current_gene.sequence.iter().filter(|c|
                     c.lh == Nucleobase::A || c.lh == Nucleobase::T ||
                     c.hl == Nucleobase::A || c.hl == Nucleobase::T ||
@@ -247,10 +247,10 @@ fn sequence_genes(mrna: &mut Array2<Codon>) -> Vec<Gene> {
 }
 
 // =====================================================================
-// API Codec (Remplaçant direct de geometric.rs pour les détails)
+// Codec API (direct replacement for geometric.rs for details)
 // =====================================================================
 
-/// Encode les détails via séquençage génétique.
+/// Encodes details via genetic sequencing.
 pub fn encode_detail_subband_dna(
     lh: &Array2<f64>, hl: &Array2<f64>, hh: &Array2<f64>,
     max_passes: usize, step: f64
@@ -284,7 +284,7 @@ pub fn encode_detail_subband_dna(
     (all_genes, resid_lh, resid_hl, resid_hh)
 }
 
-/// Traduit et rend les gènes sur l'image (Décodage)
+/// Translates and renders genes onto the image (decoding).
 pub fn render_genes(genes: &[Gene], h: usize, w: usize, step: f64) -> (Array2<f64>, Array2<f64>, Array2<f64>) {
     let mut lh = Array2::<f64>::zeros((h, w));
     let mut hl = Array2::<f64>::zeros((h, w));
@@ -304,12 +304,12 @@ pub fn render_genes(genes: &[Gene], h: usize, w: usize, step: f64) -> (Array2<f6
     (lh, hl, hh)
 }
 
-/// Le facteur de raffinement résiduel aux positions gène.
-/// Le résidu ADN est toujours < bin_width/2 ≈ 0.56*step, donc le quantificateur
-/// standard (step) ne capture rien. On utilise step/REFINE pour y accéder.
+/// Residual refinement factor at gene positions.
+/// The DNA residual is always < bin_width/2 ~ 0.56*step, so the standard
+/// quantizer (step) captures nothing. We use step/REFINE to access it.
 pub const GENE_REFINE_FACTOR: f64 = 3.0;
 
-/// Construit un step_map pour une sous-bande: step/REFINE aux positions gène, step ailleurs.
+/// Builds a step_map for a subband: step/REFINE at gene positions, step elsewhere.
 pub fn build_refined_step_map(
     genes: &[Gene], band_h: usize, band_w: usize, base_step: f64,
     band_index: usize, // 0=LH, 1=HL, 2=HH
@@ -330,11 +330,11 @@ pub fn build_refined_step_map(
 }
 
 // =====================================================================
-// Sérialisation Biomimétique (Empaquetage rANS)
+// Biomimetic serialization (rANS packing)
 // =====================================================================
 
 // Zigzag encoding: maps small signed values to small unsigned values.
-// 0→0, -1→1, 1→2, -2→3, 2→4, ...
+// 0->0, -1->1, 1->2, -2->3, 2->4, ...
 #[inline]
 fn zigzag_encode(val: i16) -> u16 {
     ((val << 1) ^ (val >> 15)) as u16
@@ -358,7 +358,7 @@ pub fn pack_genome(genes: &[Gene]) -> Vec<u8> {
     let mut prev_y: i32 = 0;
 
     for gene in genes {
-        // Delta-zigzag: positions relatives au gène précédent
+        // Delta-zigzag: positions relative to previous gene
         let dx = gene.start_x as i32 - prev_x;
         let dy = gene.start_y as i32 - prev_y;
         let zx = zigzag_encode(dx as i16);
