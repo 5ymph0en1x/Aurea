@@ -5,6 +5,7 @@
 # - File association (double-click)
 # - "image" type in Explorer
 # - WIC codec (Photos, Paint, any WIC app)
+# - Right-click submenu "Convert to AUREA" with quality presets
 
 $ErrorActionPreference = "Stop"
 
@@ -19,7 +20,7 @@ $ContainerGuid = "{267A0E00-C0DE-4ABC-9DEF-000000267013}"
 $ThumbHandlerCatid = "{E357FCCD-A995-4576-B01F-234630154E96}"
 $WicDecoderCatid = "{7ED96837-96F0-4812-B211-F13C24117ED3}"
 
-Write-Host "=== AUREA v10 Installation for Windows ===" -ForegroundColor Cyan
+Write-Host "=== AUREA v12 Installation for Windows ===" -ForegroundColor Cyan
 Write-Host ""
 
 # ======================================================================
@@ -105,7 +106,21 @@ if ((Test-Path $InstallDir) -or (Test-Path "HKLM:\SOFTWARE\Classes\.aur")) {
     Remove-Item -Path "HKLM:\SOFTWARE\Classes\.aur" -Recurse -Force
     Remove-Item -Path "HKLM:\SOFTWARE\Classes\aurea.image" -Recurse -Force
     Remove-Item -Path "HKLM:\SOFTWARE\Classes\aurea.PhotoViewer" -Recurse -Force
+    # Remove old single-entry context menu
     Remove-Item -Path "HKLM:\SOFTWARE\Classes\SystemFileAssociations\image\shell\ConvertToAUREA" -Recurse -Force
+    # Remove cascading submenu (parent + CommandStore entries + stale Classes entries)
+    Remove-Item -Path "HKLM:\SOFTWARE\Classes\SystemFileAssociations\image\shell\AUREAConvert" -Recurse -Force
+    # Stale entries from buggy install (wrong registry location)
+    Remove-Item -Path "HKLM:\SOFTWARE\Classes\AUREAConvert.Low" -Recurse -Force
+    Remove-Item -Path "HKLM:\SOFTWARE\Classes\AUREAConvert.Medium" -Recurse -Force
+    Remove-Item -Path "HKLM:\SOFTWARE\Classes\AUREAConvert.High" -Recurse -Force
+    Remove-Item -Path "HKLM:\SOFTWARE\Classes\AUREAConvert.Ultra" -Recurse -Force
+    # Correct CommandStore location
+    $CmdStoreClean = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\CommandStore\shell"
+    Remove-Item -Path "$CmdStoreClean\AUREAConvert.Low" -Recurse -Force
+    Remove-Item -Path "$CmdStoreClean\AUREAConvert.Medium" -Recurse -Force
+    Remove-Item -Path "$CmdStoreClean\AUREAConvert.High" -Recurse -Force
+    Remove-Item -Path "$CmdStoreClean\AUREAConvert.Ultra" -Recurse -Force
     Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\KindMap" -Name ".aur" -Force
     Remove-Item -Path $InstallDir -Recurse -Force
     $cleaned += "AUREA"
@@ -120,7 +135,7 @@ if ($cleaned.Count -gt 0) {
 }
 
 # ======================================================================
-# 3. Copy v10 binaries
+# 3. Copy v12 binaries + generate per-quality VBS helpers
 # ======================================================================
 Write-Host "[3/7] Copying binaries to $InstallDir..."
 New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
@@ -146,14 +161,23 @@ Copy-Item $SrcDll $DllPath -Force
 Copy-Item $SrcCli $CliPath -Force
 Copy-Item $SrcViewer $ViewerPath -Force
 
-# Generate silent convert helper (VBS, zero window flash)
-$VbsPath = "$InstallDir\convert.vbs"
+# Generate silent convert helpers — one VBS per quality preset (zero window flash)
+$Presets = @(
+    @{ Name = "Low";    Quality = 20 },
+    @{ Name = "Medium"; Quality = 50 },
+    @{ Name = "High";   Quality = 75 },
+    @{ Name = "Ultra";  Quality = 95 }
+)
+
+foreach ($p in $Presets) {
+    $VbsPath = "$InstallDir\convert_$($p.Name.ToLower()).vbs"
 @"
 Dim exe, src
 exe = "$InstallDir\aurea.exe"
 src = WScript.Arguments(0)
-CreateObject("WScript.Shell").Run """" & exe & """ encode """ & src & """ -q 50", 0, True
+CreateObject("WScript.Shell").Run """" & exe & """ encode """ & src & """ -q $($p.Quality)", 0, True
 "@ | Set-Content -Path $VbsPath -Encoding ASCII
+}
 
 Write-Host "  OK" -ForegroundColor Green
 
@@ -181,7 +205,7 @@ Set-ItemProperty -Path "HKLM:\SOFTWARE\Classes\.aur" -Name "Content Type" -Value
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Classes\.aur" -Name "PerceivedType" -Value "image"
 
 # File type description
-New-Item -Path "HKLM:\SOFTWARE\Classes\aurea.image" -Value "AUREA v10 Image" -Force | Out-Null
+New-Item -Path "HKLM:\SOFTWARE\Classes\aurea.image" -Value "AUREA v12 Image" -Force | Out-Null
 New-Item -Path "HKLM:\SOFTWARE\Classes\aurea.image\DefaultIcon" -Value "imageres.dll,67" -Force | Out-Null
 
 # Default open (aurea-viewer)
@@ -226,15 +250,33 @@ if (-not (Test-Path $KindMapKey)) {
 Set-ItemProperty -Path $KindMapKey -Name ".aur" -Value "picture"
 
 # ======================================================================
-# 6. Context menu "Convert to AUREA" on all images
+# 6. Context menu "Convert to AUREA" with quality submenu
 # ======================================================================
-Write-Host "[6/7] Adding 'Convert to AUREA' context menu..."
+Write-Host "[6/7] Adding 'Convert to AUREA' context submenu..."
 
-$ConvertKey = "HKLM:\SOFTWARE\Classes\SystemFileAssociations\image\shell\ConvertToAUREA"
-New-Item -Path $ConvertKey -Value "Convert to AUREA" -Force | Out-Null
-Set-ItemProperty -Path $ConvertKey -Name "Icon" -Value "`"$CliPath`",0"
-New-Item -Path "$ConvertKey\command" -Force | Out-Null
-Set-ItemProperty -Path "$ConvertKey\command" -Name "(Default)" -Value "wscript.exe `"$InstallDir\convert.vbs`" `"%1`""
+# Parent cascade entry on all image files
+# SubCommands = "" tells Windows to look in the shell\ subkey of this entry
+$ParentKey = "HKLM:\SOFTWARE\Classes\SystemFileAssociations\image\shell\AUREAConvert"
+New-Item -Path $ParentKey -Force | Out-Null
+Set-ItemProperty -Path $ParentKey -Name "MUIVerb" -Value "Convert to AUREA"
+Set-ItemProperty -Path $ParentKey -Name "Icon" -Value "`"$CliPath`",0"
+Set-ItemProperty -Path $ParentKey -Name "SubCommands" -Value ""
+
+# Sub-entries directly under the parent shell\ key (Win10 compatible)
+$PresetDefs = @(
+    @{ Id = "01_Low";    Label = "Low (q20)";    Vbs = "convert_low.vbs" },
+    @{ Id = "02_Medium"; Label = "Medium (q50)"; Vbs = "convert_medium.vbs" },
+    @{ Id = "03_High";   Label = "High (q75)";   Vbs = "convert_high.vbs" },
+    @{ Id = "04_Ultra";  Label = "Ultra (q95)";  Vbs = "convert_ultra.vbs" }
+)
+
+foreach ($def in $PresetDefs) {
+    $SubKey = "$ParentKey\shell\$($def.Id)"
+    New-Item -Path $SubKey -Force | Out-Null
+    Set-ItemProperty -Path $SubKey -Name "MUIVerb" -Value $def.Label
+    New-Item -Path "$SubKey\command" -Force | Out-Null
+    Set-ItemProperty -Path "$SubKey\command" -Name "(Default)" -Value "wscript.exe `"$InstallDir\$($def.Vbs)`" `"%1`""
+}
 
 Write-Host "  OK" -ForegroundColor Green
 
@@ -249,11 +291,11 @@ New-Item -Path "$WicClsidKey\InProcServer32" -Value $DllPath -Force | Out-Null
 Set-ItemProperty -Path "$WicClsidKey\InProcServer32" -Name "ThreadingModel" -Value "Both"
 
 Set-ItemProperty -Path $WicClsidKey -Name "Author" -Value "aurea"
-Set-ItemProperty -Path $WicClsidKey -Name "FriendlyName" -Value "AUREA v10 Image Decoder"
+Set-ItemProperty -Path $WicClsidKey -Name "FriendlyName" -Value "AUREA v12 Image Decoder"
 Set-ItemProperty -Path $WicClsidKey -Name "ContainerFormat" -Value $ContainerGuid
 Set-ItemProperty -Path $WicClsidKey -Name "FileExtensions" -Value ".aur"
 Set-ItemProperty -Path $WicClsidKey -Name "MimeTypes" -Value "image/x-aurea"
-Set-ItemProperty -Path $WicClsidKey -Name "Version" -Value "10.0.0"
+Set-ItemProperty -Path $WicClsidKey -Name "Version" -Value "12.0.0"
 Set-ItemProperty -Path $WicClsidKey -Name "VendorGUID" -Value $ContainerGuid
 
 $FormatsKey = "$WicClsidKey\Formats"
@@ -273,7 +315,7 @@ Set-ItemProperty -Path $Pat0 -Name "Mask" -Value ([byte[]]@(0xFF,0xFF,0xFF,0xFF)
 $WicCatKey = "HKLM:\SOFTWARE\Classes\CLSID\$WicDecoderCatid\Instance\$ClsidWic"
 New-Item -Path $WicCatKey -Force | Out-Null
 Set-ItemProperty -Path $WicCatKey -Name "CLSID" -Value $ClsidWic
-Set-ItemProperty -Path $WicCatKey -Name "FriendlyName" -Value "AUREA v10 Image Decoder"
+Set-ItemProperty -Path $WicCatKey -Name "FriendlyName" -Value "AUREA v12 Image Decoder"
 
 Write-Host "  OK" -ForegroundColor Green
 
@@ -288,13 +330,14 @@ Start-Process explorer
 Write-Host "  OK" -ForegroundColor Green
 
 Write-Host ""
-Write-Host "=== AUREA v10 installation complete ===" -ForegroundColor Cyan
+Write-Host "=== AUREA v12 installation complete ===" -ForegroundColor Cyan
 Write-Host ""
-Write-Host ".aur files (AUR2 format) now have:"
+Write-Host ".aur files (AUR2 v12 format) now have:"
 Write-Host "  - Native thumbnails in Windows Explorer"
 Write-Host "  - Double-click to open with AUREA Viewer"
 Write-Host "  - 'image' type in file properties"
-Write-Host "  - Right-click on any image: 'Convert to AUREA'"
+Write-Host "  - Right-click on any image: 'Convert to AUREA' submenu"
+Write-Host "    - Low (q20), Medium (q50), High (q75), Ultra (q95)"
 Write-Host "  - WIC codec: Photos, Paint, any WIC application"
 Write-Host ""
 Write-Host "Binaries installed to: $InstallDir"

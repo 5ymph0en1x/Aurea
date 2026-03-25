@@ -68,7 +68,21 @@ if ((Test-Path $AureaDir) -or (Test-Path "HKLM:\SOFTWARE\Classes\.aur")) {
     Remove-Item -Path "HKLM:\SOFTWARE\Classes\.aur" -Recurse -Force
     Remove-Item -Path "HKLM:\SOFTWARE\Classes\aurea.image" -Recurse -Force
     Remove-Item -Path "HKLM:\SOFTWARE\Classes\aurea.PhotoViewer" -Recurse -Force
+    # Old single-entry context menu
     Remove-Item -Path "HKLM:\SOFTWARE\Classes\SystemFileAssociations\image\shell\ConvertToAUREA" -Recurse -Force
+    # v12 cascading submenu (parent)
+    Remove-Item -Path "HKLM:\SOFTWARE\Classes\SystemFileAssociations\image\shell\AUREAConvert" -Recurse -Force
+    # Stale entries from buggy install (wrong registry location)
+    Remove-Item -Path "HKLM:\SOFTWARE\Classes\AUREAConvert.Low" -Recurse -Force
+    Remove-Item -Path "HKLM:\SOFTWARE\Classes\AUREAConvert.Medium" -Recurse -Force
+    Remove-Item -Path "HKLM:\SOFTWARE\Classes\AUREAConvert.High" -Recurse -Force
+    Remove-Item -Path "HKLM:\SOFTWARE\Classes\AUREAConvert.Ultra" -Recurse -Force
+    # Correct CommandStore location
+    $CmdStore = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\CommandStore\shell"
+    Remove-Item -Path "$CmdStore\AUREAConvert.Low" -Recurse -Force
+    Remove-Item -Path "$CmdStore\AUREAConvert.Medium" -Recurse -Force
+    Remove-Item -Path "$CmdStore\AUREAConvert.High" -Recurse -Force
+    Remove-Item -Path "$CmdStore\AUREAConvert.Ultra" -Recurse -Force
     Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\KindMap" -Name ".aur" -Force
     Remove-Item -Path $AureaDir -Recurse -Force
     $cleaned += "AUREA"
