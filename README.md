@@ -21,6 +21,11 @@ Written entirely in Rust. Ships as a CLI encoder/decoder, a native GUI viewer, a
 
 
 <p align="center">
+  <img src="samples/comparison.png" />
+</p>
+
+
+<p align="center">
   <img src="samples/rate_distortion.png" />
 </p>
 
