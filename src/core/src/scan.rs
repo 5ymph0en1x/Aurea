@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn test_golden_spiral_monotonicity() {
         let order = golden_spiral_order(16);
-        let viol = validate_spiral_monotonicity(&order, &crate::lot::QMAT_16);
+        let viol = validate_spiral_monotonicity(&order, &*crate::lot::QMAT_16);
         eprintln!("Golden spiral monotonicity violations: {:.1}%", viol);
         assert!(viol < 50.0, "too many violations: {:.1}%", viol);
     }
