@@ -1,5 +1,47 @@
 //! Calibrated constants from 12 HD reference images (Point 8).
 //! All empirical thresholds and factors centralized here for systematic tuning.
+//!
+//! In-the-loop optimization: all tunable constants can be overridden via env vars
+//! (prefix AUREA_). When unset, compiled defaults are used.
+
+use std::sync::LazyLock;
+
+fn env_f64(name: &str, default: f64) -> f64 {
+    std::env::var(name).ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(default)
+}
+
+// ======================================================================
+// In-the-loop tunable parameters (LazyLock — read env once at startup)
+// ======================================================================
+
+/// tRNA step factors: [dark, mid-dark, mid-bright(=1.0 ref), bright]
+pub static TUNABLE_TRNA: LazyLock<[f64; 4]> = LazyLock::new(|| [
+    env_f64("AUREA_TRNA_DARK", 0.7),
+    env_f64("AUREA_TRNA_MIDDARK", 0.9),
+    1.0,
+    env_f64("AUREA_TRNA_BRIGHT", 1.2),
+]);
+
+/// qmat_power_for_quality parameters: [low_plateau, high_floor, q_transition, q_range]
+pub static TUNABLE_POWER: LazyLock<[f64; 4]> = LazyLock::new(|| [
+    env_f64("AUREA_POWER_LOW", 0.55),
+    env_f64("AUREA_POWER_HIGH", 0.05),
+    env_f64("AUREA_POWER_QTRANS", 60.0),
+    env_f64("AUREA_POWER_QRANGE", 40.0),
+]);
+
+/// Psychovisual Turing pivot: [gamma_low, gamma_high]
+pub static TUNABLE_PIVOT: LazyLock<[f64; 2]> = LazyLock::new(|| [
+    env_f64("AUREA_PIVOT_GAMMA_LOW", 1.25),
+    env_f64("AUREA_PIVOT_GAMMA_HIGH", -0.85),
+]);
+
+/// Foveal saliency exponent
+pub static TUNABLE_FOVEAL_K: LazyLock<f64> = LazyLock::new(||
+    env_f64("AUREA_FOVEAL_K", 1.5)
+);
 
 // ======================================================================
 // Codon 3D/4D calibrated thresholds
@@ -17,6 +59,7 @@ pub const CODON_LUM_THRESHOLDS: [f64; 3] = [64.0, 128.0, 192.0];
 /// but was inoperant (all blocks at 1.35). Now active, 3× ratio is perceptually correct.
 /// Tightened from [0.5, 0.75, 1.0, 1.5] — the 3:1 ratio was too aggressive,
 /// causing dark areas to consume disproportionate bits for marginal PSNR gain.
+/// Tunable via AUREA_TRNA_DARK, AUREA_TRNA_MIDDARK, AUREA_TRNA_BRIGHT.
 pub const CODON_TRNA: [f64; 4] = [0.7, 0.9, 1.0, 1.2];
 
 /// Saturation energy threshold for chroma-adaptive codon.
@@ -150,15 +193,14 @@ pub const DEAD_ZONE_CONSTANT: f64 = 0.22;
 /// At low quality, 0.55 penalizes HF heavily (saves bits).
 /// At high quality, flattens toward 0.0 (all frequencies equal = max PSNR).
 pub fn qmat_power_for_quality(quality: u8) -> f64 {
+    let [p_low, p_high, q_trans, q_range] = *TUNABLE_POWER;
     let q = quality as f64;
-    if q <= 60.0 {
-        0.55 // Full HF penalization
+    if q <= q_trans {
+        p_low
     } else {
-        // Smooth ramp from 0.55 at Q=60 to 0.05 at Q=100
-        let t = ((q - 60.0) / 40.0).clamp(0.0, 1.0);
-        // Smoothstep for gentle transition
-        let s = t * t * (3.0 - 2.0 * t);
-        0.55 * (1.0 - s) + 0.05 * s
+        let t = ((q - q_trans) / q_range).clamp(0.0, 1.0);
+        let s = t * t * (3.0 - 2.0 * t); // smoothstep
+        p_low * (1.0 - s) + p_high * s
     }
 }
 
