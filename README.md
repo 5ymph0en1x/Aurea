@@ -3,6 +3,7 @@
 **A lossy image codec built on the Golden Ratio, Turing morphogenesis, and rANS entropy coding.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
+[![Showcase](https://img.shields.io/badge/Live_Showcase-5ymph0en1x.github.io-blue)](https://5ymph0en1x.github.io/Aurea/)
 
 AUREA is an experimental image codec that replaces JPEG's 1992-era Huffman tables and fixed 8x8 blocks with a modern pipeline: variable-size Lapped Orthogonal Transform (8/16/32), psychovisual Turing saliency fields, Chroma-from-Luma prediction, and rANS entropy coding with Exp-Golomb magnitudes.
 
