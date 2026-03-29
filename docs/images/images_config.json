@@ -1,0 +1,590 @@
+[
+  {
+    "name": "agree",
+    "label": "Agree",
+    "original": "images/agree_original.png",
+    "aurea": {
+      "20": "images/agree_aurea_q20.png",
+      "50": "images/agree_aurea_q50.png",
+      "95": "images/agree_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/agree_jpeg_q20.png",
+      "50": "images/agree_jpeg_q50.png",
+      "95": "images/agree_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "246.5 KB",
+        "ratio": "77.9:1",
+        "psnr": "35.64"
+      },
+      "50": {
+        "size": "332.7 KB",
+        "ratio": "57.7:1",
+        "psnr": "36.82"
+      },
+      "95": {
+        "size": "1.13 MB",
+        "ratio": "16.6:1",
+        "psnr": "40.3"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "247.0 KB",
+        "ratio": "77.7:1",
+        "psnr": "34.56"
+      },
+      "50": {
+        "size": "362.0 KB",
+        "ratio": "53.0:1",
+        "psnr": "37.67"
+      },
+      "95": {
+        "size": "1.58 MB",
+        "ratio": "11.8:1",
+        "psnr": "43.74"
+      }
+    }
+  },
+  {
+    "name": "alchemist",
+    "label": "Alchemist",
+    "original": "images/alchemist_original.png",
+    "aurea": {
+      "20": "images/alchemist_aurea_q20.png",
+      "50": "images/alchemist_aurea_q50.png",
+      "95": "images/alchemist_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/alchemist_jpeg_q20.png",
+      "50": "images/alchemist_jpeg_q50.png",
+      "95": "images/alchemist_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "211.4 KB",
+        "ratio": "51.1:1",
+        "psnr": "31.41"
+      },
+      "50": {
+        "size": "295.2 KB",
+        "ratio": "36.6:1",
+        "psnr": "32.7"
+      },
+      "95": {
+        "size": "1.09 MB",
+        "ratio": "9.7:1",
+        "psnr": "36.7"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "179.3 KB",
+        "ratio": "60.2:1",
+        "psnr": "31.23"
+      },
+      "50": {
+        "size": "277.4 KB",
+        "ratio": "38.9:1",
+        "psnr": "34.27"
+      },
+      "95": {
+        "size": "1.16 MB",
+        "ratio": "9.1:1",
+        "psnr": "42.5"
+      }
+    }
+  },
+  {
+    "name": "burn_out",
+    "label": "Burn Out",
+    "original": "images/burn_out_original.png",
+    "aurea": {
+      "20": "images/burn_out_aurea_q20.png",
+      "50": "images/burn_out_aurea_q50.png",
+      "95": "images/burn_out_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/burn_out_jpeg_q20.png",
+      "50": "images/burn_out_jpeg_q50.png",
+      "95": "images/burn_out_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "192.7 KB",
+        "ratio": "62.8:1",
+        "psnr": "33.92"
+      },
+      "50": {
+        "size": "266.8 KB",
+        "ratio": "45.3:1",
+        "psnr": "35.14"
+      },
+      "95": {
+        "size": "996.6 KB",
+        "ratio": "12.1:1",
+        "psnr": "38.45"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "211.1 KB",
+        "ratio": "57.3:1",
+        "psnr": "34.6"
+      },
+      "50": {
+        "size": "320.5 KB",
+        "ratio": "37.7:1",
+        "psnr": "38.31"
+      },
+      "95": {
+        "size": "1.22 MB",
+        "ratio": "9.7:1",
+        "psnr": "44.92"
+      }
+    }
+  },
+  {
+    "name": "chilling",
+    "label": "Chilling",
+    "original": "images/chilling_original.png",
+    "aurea": {
+      "20": "images/chilling_aurea_q20.png",
+      "50": "images/chilling_aurea_q50.png",
+      "95": "images/chilling_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/chilling_jpeg_q20.png",
+      "50": "images/chilling_jpeg_q50.png",
+      "95": "images/chilling_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "701.1 KB",
+        "ratio": "39.4:1",
+        "psnr": "31.27"
+      },
+      "50": {
+        "size": "968.0 KB",
+        "ratio": "28.6:1",
+        "psnr": "32.28"
+      },
+      "95": {
+        "size": "3.64 MB",
+        "ratio": "7.4:1",
+        "psnr": "35.13"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "557.4 KB",
+        "ratio": "49.6:1",
+        "psnr": "31.91"
+      },
+      "50": {
+        "size": "901.5 KB",
+        "ratio": "30.7:1",
+        "psnr": "34.94"
+      },
+      "95": {
+        "size": "3.68 MB",
+        "ratio": "7.3:1",
+        "psnr": "42.4"
+      }
+    }
+  },
+  {
+    "name": "dispair",
+    "label": "Dispair",
+    "original": "images/dispair_original.png",
+    "aurea": {
+      "20": "images/dispair_aurea_q20.png",
+      "50": "images/dispair_aurea_q50.png",
+      "95": "images/dispair_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/dispair_jpeg_q20.png",
+      "50": "images/dispair_jpeg_q50.png",
+      "95": "images/dispair_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "275.7 KB",
+        "ratio": "39.2:1",
+        "psnr": "29.96"
+      },
+      "50": {
+        "size": "401.2 KB",
+        "ratio": "26.9:1",
+        "psnr": "31.3"
+      },
+      "95": {
+        "size": "1.55 MB",
+        "ratio": "6.8:1",
+        "psnr": "36.01"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "217.9 KB",
+        "ratio": "49.6:1",
+        "psnr": "29.35"
+      },
+      "50": {
+        "size": "373.9 KB",
+        "ratio": "28.9:1",
+        "psnr": "32.02"
+      },
+      "95": {
+        "size": "1.61 MB",
+        "ratio": "6.5:1",
+        "psnr": "40.68"
+      }
+    }
+  },
+  {
+    "name": "fine_ally",
+    "label": "Fine Ally",
+    "original": "images/fine_ally_original.png",
+    "aurea": {
+      "20": "images/fine_ally_aurea_q20.png",
+      "50": "images/fine_ally_aurea_q50.png",
+      "95": "images/fine_ally_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/fine_ally_jpeg_q20.png",
+      "50": "images/fine_ally_jpeg_q50.png",
+      "95": "images/fine_ally_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "388.0 KB",
+        "ratio": "59.7:1",
+        "psnr": "33.08"
+      },
+      "50": {
+        "size": "522.9 KB",
+        "ratio": "44.3:1",
+        "psnr": "34.2"
+      },
+      "95": {
+        "size": "1.79 MB",
+        "ratio": "12.7:1",
+        "psnr": "38.31"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "349.9 KB",
+        "ratio": "66.2:1",
+        "psnr": "33.02"
+      },
+      "50": {
+        "size": "521.8 KB",
+        "ratio": "44.4:1",
+        "psnr": "36.18"
+      },
+      "95": {
+        "size": "1.99 MB",
+        "ratio": "11.4:1",
+        "psnr": "44.74"
+      }
+    }
+  },
+  {
+    "name": "honey",
+    "label": "Honey",
+    "original": "images/honey_original.png",
+    "aurea": {
+      "20": "images/honey_aurea_q20.png",
+      "50": "images/honey_aurea_q50.png",
+      "95": "images/honey_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/honey_jpeg_q20.png",
+      "50": "images/honey_jpeg_q50.png",
+      "95": "images/honey_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "432.0 KB",
+        "ratio": "43.7:1",
+        "psnr": "31.68"
+      },
+      "50": {
+        "size": "600.8 KB",
+        "ratio": "31.5:1",
+        "psnr": "32.8"
+      },
+      "95": {
+        "size": "2.26 MB",
+        "ratio": "8.2:1",
+        "psnr": "36.02"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "375.3 KB",
+        "ratio": "50.4:1",
+        "psnr": "32.18"
+      },
+      "50": {
+        "size": "577.4 KB",
+        "ratio": "32.7:1",
+        "psnr": "35.41"
+      },
+      "95": {
+        "size": "2.20 MB",
+        "ratio": "8.4:1",
+        "psnr": "43.24"
+      }
+    }
+  },
+  {
+    "name": "kryte",
+    "label": "Kryte",
+    "original": "images/kryte_original.png",
+    "aurea": {
+      "20": "images/kryte_aurea_q20.png",
+      "50": "images/kryte_aurea_q50.png",
+      "95": "images/kryte_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/kryte_jpeg_q20.png",
+      "50": "images/kryte_jpeg_q50.png",
+      "95": "images/kryte_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "263.9 KB",
+        "ratio": "48.0:1",
+        "psnr": "32.32"
+      },
+      "50": {
+        "size": "361.5 KB",
+        "ratio": "35.1:1",
+        "psnr": "33.38"
+      },
+      "95": {
+        "size": "1.28 MB",
+        "ratio": "9.7:1",
+        "psnr": "36.21"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "234.2 KB",
+        "ratio": "54.1:1",
+        "psnr": "33.08"
+      },
+      "50": {
+        "size": "381.0 KB",
+        "ratio": "33.3:1",
+        "psnr": "36.82"
+      },
+      "95": {
+        "size": "1.50 MB",
+        "ratio": "8.2:1",
+        "psnr": "44.82"
+      }
+    }
+  },
+  {
+    "name": "legacy",
+    "label": "Legacy",
+    "original": "images/legacy_original.png",
+    "aurea": {
+      "20": "images/legacy_aurea_q20.png",
+      "50": "images/legacy_aurea_q50.png",
+      "95": "images/legacy_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/legacy_jpeg_q20.png",
+      "50": "images/legacy_jpeg_q50.png",
+      "95": "images/legacy_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "331.5 KB",
+        "ratio": "64.9:1",
+        "psnr": "31.69"
+      },
+      "50": {
+        "size": "471.4 KB",
+        "ratio": "45.6:1",
+        "psnr": "32.79"
+      },
+      "95": {
+        "size": "1.89 MB",
+        "ratio": "11.1:1",
+        "psnr": "37.41"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "346.8 KB",
+        "ratio": "62.0:1",
+        "psnr": "31.47"
+      },
+      "50": {
+        "size": "565.4 KB",
+        "ratio": "38.0:1",
+        "psnr": "34.12"
+      },
+      "95": {
+        "size": "2.62 MB",
+        "ratio": "8.0:1",
+        "psnr": "41.22"
+      }
+    }
+  },
+  {
+    "name": "mind_your_steps",
+    "label": "Mind Your Steps",
+    "original": "images/mind_your_steps_original.png",
+    "aurea": {
+      "20": "images/mind_your_steps_aurea_q20.png",
+      "50": "images/mind_your_steps_aurea_q50.png",
+      "95": "images/mind_your_steps_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/mind_your_steps_jpeg_q20.png",
+      "50": "images/mind_your_steps_jpeg_q50.png",
+      "95": "images/mind_your_steps_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "372.7 KB",
+        "ratio": "29.0:1",
+        "psnr": "29.03"
+      },
+      "50": {
+        "size": "527.9 KB",
+        "ratio": "20.5:1",
+        "psnr": "30.34"
+      },
+      "95": {
+        "size": "1.96 MB",
+        "ratio": "5.4:1",
+        "psnr": "34.63"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "281.4 KB",
+        "ratio": "38.4:1",
+        "psnr": "28.72"
+      },
+      "50": {
+        "size": "495.2 KB",
+        "ratio": "21.8:1",
+        "psnr": "31.72"
+      },
+      "95": {
+        "size": "1.94 MB",
+        "ratio": "5.4:1",
+        "psnr": "40.27"
+      }
+    }
+  },
+  {
+    "name": "peace",
+    "label": "Peace",
+    "original": "images/peace_original.png",
+    "aurea": {
+      "20": "images/peace_aurea_q20.png",
+      "50": "images/peace_aurea_q50.png",
+      "95": "images/peace_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/peace_jpeg_q20.png",
+      "50": "images/peace_jpeg_q50.png",
+      "95": "images/peace_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "136.6 KB",
+        "ratio": "79.1:1",
+        "psnr": "35.29"
+      },
+      "50": {
+        "size": "186.0 KB",
+        "ratio": "58.0:1",
+        "psnr": "36.69"
+      },
+      "95": {
+        "size": "632.0 KB",
+        "ratio": "17.1:1",
+        "psnr": "41.38"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "156.4 KB",
+        "ratio": "69.1:1",
+        "psnr": "35.0"
+      },
+      "50": {
+        "size": "228.7 KB",
+        "ratio": "47.2:1",
+        "psnr": "39.21"
+      },
+      "95": {
+        "size": "880.6 KB",
+        "ratio": "12.3:1",
+        "psnr": "46.38"
+      }
+    }
+  },
+  {
+    "name": "phoenix",
+    "label": "Phoenix",
+    "original": "images/phoenix_original.png",
+    "aurea": {
+      "20": "images/phoenix_aurea_q20.png",
+      "50": "images/phoenix_aurea_q50.png",
+      "95": "images/phoenix_aurea_q95.png"
+    },
+    "jpeg": {
+      "20": "images/phoenix_jpeg_q20.png",
+      "50": "images/phoenix_jpeg_q50.png",
+      "95": "images/phoenix_jpeg_q95.png"
+    },
+    "metrics_aurea": {
+      "20": {
+        "size": "146.6 KB",
+        "ratio": "57.3:1",
+        "psnr": "30.88"
+      },
+      "50": {
+        "size": "210.0 KB",
+        "ratio": "40.0:1",
+        "psnr": "32.27"
+      },
+      "95": {
+        "size": "805.4 KB",
+        "ratio": "10.4:1",
+        "psnr": "37.28"
+      }
+    },
+    "metrics_jpeg": {
+      "20": {
+        "size": "147.0 KB",
+        "ratio": "57.1:1",
+        "psnr": "30.54"
+      },
+      "50": {
+        "size": "233.7 KB",
+        "ratio": "35.9:1",
+        "psnr": "33.4"
+      },
+      "95": {
+        "size": "963.5 KB",
+        "ratio": "8.7:1",
+        "psnr": "42.53"
+      }
+    }
+  }
+]

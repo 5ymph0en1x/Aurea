@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AUREA — Visual Comparison</title>
+<meta name="description" content="Compare original images with AUREA and JPEG compression side by side. Built from scratch in Rust around the golden ratio (φ).">
+<meta property="og:title" content="AUREA — See the Difference">
+<meta property="og:description" content="Lossy image codec built from scratch in Rust around φ. Drag to compare against JPEG.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --gold: #C8A84E;
+    --gold-light: #E8D5A0;
+    --gold-dim: #8B7432;
+    --blue: #5B8CB8;
+    --blue-light: #8DB8D8;
+    --blue-dim: #3D6080;
+    --bg: #0A0A0B;
+    --bg-card: #111113;
+    --bg-hover: #1A1A1D;
+    --text: #E8E6E1;
+    --text-dim: #7A7870;
+    --border: #2A2A2D;
+    --green: #5EA86A;
+    --red: #C85B5B;
+    --font-display: 'Cormorant Garamond', Georgia, serif;
+    --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-display);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* === HEADER === */
+  .header {
+    text-align: center;
+    padding: 2.5rem 1.5rem 1.8rem;
+    position: relative;
+  }
+
+  .header::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 61.8%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--gold-dim), transparent);
+  }
+
+  .logo {
+    font-family: var(--font-display);
+    font-size: 3rem;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    color: var(--gold);
+    margin-bottom: 0.2rem;
+    animation: fadeIn 1s ease-out;
+  }
+
+  .logo span {
+    font-weight: 400;
+    font-style: italic;
+    color: var(--gold-light);
+    font-size: 0.6em;
+    margin-left: 0.3em;
+    vertical-align: super;
+  }
+
+  .tagline {
+    font-size: 1rem;
+    color: var(--text-dim);
+    font-style: italic;
+    letter-spacing: 0.04em;
+    animation: fadeIn 1.2s ease-out;
+  }
+
+  /* === CONTROLS BAR === */
+  .controls {
+    max-width: 960px;
+    margin: 1.2rem auto 0;
+    padding: 0 1.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 1.2rem;
+  }
+
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .control-group label {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  /* Image selector pills */
+  .pill-group {
+    display: flex;
+    gap: 0.3rem;
+  }
+
+  .pill-group button {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-card);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    letter-spacing: 0.02em;
+  }
+
+  .pill-group button:hover {
+    border-color: var(--gold-dim);
+    color: var(--gold-light);
+    background: var(--bg-hover);
+  }
+
+  .pill-group button.active {
+    border-color: var(--gold);
+    color: var(--gold);
+    background: rgba(200, 168, 78, 0.08);
+  }
+
+  /* Quality & mode selectors */
+  .styled-select {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-card);
+    color: var(--gold-light);
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .styled-select:focus { border-color: var(--gold); }
+
+  /* === COMPARISON MODE TOGGLE === */
+  .mode-toggle {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .mode-toggle button {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    padding: 0.35rem 0.65rem;
+    border: none;
+    background: var(--bg-card);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.2s;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    border-right: 1px solid var(--border);
+  }
+
+  .mode-toggle button:last-child { border-right: none; }
+
+  .mode-toggle button:hover {
+    color: var(--gold-light);
+    background: var(--bg-hover);
+  }
+
+  .mode-toggle button.active {
+    color: var(--gold);
+    background: rgba(200, 168, 78, 0.1);
+  }
+
+  /* === HINT === */
+  .hint {
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    letter-spacing: 0.06em;
+    padding: 0.8rem 0 0.5rem;
+    opacity: 0.7;
+    animation: pulse 2.5s ease-in-out infinite;
+  }
+
+  /* === COMPARISON CONTAINER === */
+  .comparison-wrapper {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 1.5rem 0.8rem;
+  }
+
+  .comparison {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 3/2;
+    overflow: hidden;
+    cursor: col-resize;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #080808;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+
+  .comparison img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #080808;
+    pointer-events: none;
+  }
+
+  .comparison .img-overlay { z-index: 2; }
+  .comparison .img-base    { z-index: 1; }
+
+  /* Slider line */
+  .slider-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    z-index: 10;
+    pointer-events: none;
+    transition: box-shadow 0.2s;
+  }
+
+  /* Color changes based on comparison mode */
+  .slider-line.mode-aurea {
+    background: var(--gold);
+    box-shadow: 0 0 8px rgba(200, 168, 78, 0.4);
+  }
+
+  .slider-line.mode-jpeg {
+    background: var(--blue);
+    box-shadow: 0 0 8px rgba(91, 140, 184, 0.4);
+  }
+
+  .slider-line.mode-versus {
+    background: linear-gradient(180deg, var(--gold), var(--blue));
+    box-shadow: 0 0 8px rgba(200, 168, 78, 0.3);
+  }
+
+  .comparison:hover .slider-line,
+  .comparison.dragging .slider-line {
+    filter: brightness(1.3);
+  }
+
+  /* Slider handle */
+  .slider-handle {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: var(--bg);
+    z-index: 11;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.5);
+    transition: transform 0.15s ease, box-shadow 0.2s;
+  }
+
+  .slider-handle.mode-aurea  { border: 2px solid var(--gold); }
+  .slider-handle.mode-jpeg   { border: 2px solid var(--blue); }
+  .slider-handle.mode-versus { border: 2px solid var(--gold-light); }
+
+  .comparison:hover .slider-handle,
+  .comparison.dragging .slider-handle {
+    transform: translate(-50%, -50%) scale(1.1);
+  }
+
+  .slider-handle svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .slider-handle.mode-aurea  svg { fill: var(--gold); }
+  .slider-handle.mode-jpeg   svg { fill: var(--blue); }
+  .slider-handle.mode-versus svg { fill: var(--gold-light); }
+
+  /* Labels */
+  .img-label {
+    position: absolute;
+    top: 10px;
+    z-index: 5;
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 0.2rem 0.55rem;
+    border-radius: 3px;
+    pointer-events: none;
+    backdrop-filter: blur(4px);
+  }
+
+  .label-left {
+    left: 10px;
+    background: rgba(200, 168, 78, 0.12);
+    color: var(--gold);
+    border: 1px solid rgba(200, 168, 78, 0.3);
+  }
+
+  .label-right {
+    right: 10px;
+    background: rgba(10, 10, 11, 0.75);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+
+  /* Versus mode: right label becomes blue */
+  .label-right.versus-jpeg {
+    background: rgba(91, 140, 184, 0.12);
+    color: var(--blue-light);
+    border: 1px solid rgba(91, 140, 184, 0.3);
+  }
+
+  /* === METRICS === */
+  .metrics-row {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0.6rem 1.5rem 0.3rem;
+    display: flex;
+    justify-content: center;
+    gap: 2rem;
+    flex-wrap: wrap;
+  }
+
+  .metrics-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.1rem;
+    min-width: 100px;
+  }
+
+  .metrics-card-title {
+    font-family: var(--font-mono);
+    font-size: 0.55rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 0.15rem 0.4rem;
+    border-radius: 2px;
+    margin-bottom: 0.2rem;
+  }
+
+  .metrics-card-title.aurea-title {
+    color: var(--gold);
+    background: rgba(200, 168, 78, 0.08);
+  }
+
+  .metrics-card-title.jpeg-title {
+    color: var(--blue-light);
+    background: rgba(91, 140, 184, 0.08);
+  }
+
+  .metrics-inner {
+    display: flex;
+    gap: 1.5rem;
+  }
+
+  .metric {
+    text-align: center;
+  }
+
+  .metric-value {
+    font-family: var(--font-mono);
+    font-size: 1.05rem;
+    font-weight: 500;
+  }
+
+  .metric-value.aurea-val { color: var(--gold-light); }
+  .metric-value.jpeg-val  { color: var(--blue-light); }
+
+  .metric-label {
+    font-family: var(--font-mono);
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-top: 0.1rem;
+  }
+
+  /* Delta badge */
+  .delta-row {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0.3rem 1.5rem 1rem;
+    display: flex;
+    justify-content: center;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .delta-badge {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    padding: 0.25rem 0.6rem;
+    border-radius: 3px;
+    letter-spacing: 0.04em;
+  }
+
+  .delta-badge.win {
+    color: var(--green);
+    background: rgba(94, 168, 106, 0.1);
+    border: 1px solid rgba(94, 168, 106, 0.25);
+  }
+
+  .delta-badge.loss {
+    color: var(--red);
+    background: rgba(200, 91, 91, 0.1);
+    border: 1px solid rgba(200, 91, 91, 0.25);
+  }
+
+  .delta-badge.neutral {
+    color: var(--text-dim);
+    background: rgba(122, 120, 112, 0.1);
+    border: 1px solid var(--border);
+  }
+
+  /* === DEMO NOTICE === */
+  .demo-notice {
+    max-width: 640px;
+    margin: 0.5rem auto 1rem;
+    padding: 0.8rem 1.2rem;
+    border: 1px dashed var(--gold-dim);
+    border-radius: 6px;
+    background: rgba(200, 168, 78, 0.04);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+    text-align: center;
+  }
+
+  .demo-notice code {
+    color: var(--gold-light);
+    background: rgba(200, 168, 78, 0.08);
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+    font-size: 0.95em;
+  }
+
+  /* === FOOTER === */
+  .footer {
+    text-align: center;
+    padding: 1.5rem 1rem 2rem;
+    border-top: 1px solid var(--border);
+    margin-top: 0.5rem;
+  }
+
+  .footer a {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--gold-dim);
+    text-decoration: none;
+    letter-spacing: 0.06em;
+    transition: color 0.2s;
+  }
+
+  .footer a:hover { color: var(--gold); }
+  .footer .sep { color: var(--border); margin: 0 0.6rem; }
+
+  .footer p {
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    margin-top: 0.6rem;
+    font-style: italic;
+  }
+
+  /* === ANIMATIONS === */
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.7; }
+    50%      { opacity: 0.3; }
+  }
+
+  /* === RESPONSIVE === */
+  @media (max-width: 640px) {
+    .logo { font-size: 2.2rem; }
+    .controls { gap: 0.8rem; }
+    .metrics-row { gap: 1rem; }
+    .metrics-inner { gap: 0.8rem; }
+    .slider-handle { width: 32px; height: 32px; }
+    .delta-row { gap: 0.8rem; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="logo">AUREA<span>φ</span></div>
+  <p class="tagline">Lossy image codec — built from scratch in Rust around the golden ratio</p>
+</header>
+
+<!-- Controls -->
+<div class="controls">
+  <!-- Image selector -->
+  <div class="control-group">
+    <label>Image</label>
+    <div class="pill-group" id="imageSelector"></div>
+  </div>
+
+  <!-- Quality selector -->
+  <div class="control-group">
+    <label>Quality</label>
+    <select class="styled-select" id="qualitySelect">
+      <option value="20">Q20</option>
+      <option value="50" selected>Q50</option>
+      <option value="95">Q95</option>
+    </select>
+  </div>
+
+  <!-- Comparison mode -->
+  <div class="control-group">
+    <label>Compare</label>
+    <div class="mode-toggle" id="modeToggle">
+      <button class="active" data-mode="aurea"  title="Original vs AUREA">Orig ↔ Aurea</button>
+      <button               data-mode="jpeg"   title="Original vs JPEG">Orig ↔ JPEG</button>
+      <button               data-mode="versus" title="AUREA vs JPEG">Aurea ↔ JPEG</button>
+    </div>
+  </div>
+</div>
+
+<!-- Hint -->
+<p class="hint" id="hint">⟵ drag the slider to compare ⟶</p>
+
+<!-- Comparison slider -->
+<div class="comparison-wrapper">
+  <div class="comparison" id="comparison">
+    <img class="img-base"    id="imgBase"    alt="Base image (right side)">
+    <img class="img-overlay" id="imgOverlay" alt="Overlay image (left side)">
+    <div class="slider-line mode-aurea" id="sliderLine"></div>
+    <div class="slider-handle mode-aurea" id="sliderHandle">
+      <svg viewBox="0 0 24 24"><path d="M8 5l-5 7 5 7M16 5l5 7-5 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="img-label label-left"  id="labelLeft">AUREA</div>
+    <div class="img-label label-right" id="labelRight">Original</div>
+  </div>
+</div>
+
+<!-- Metrics: side-by-side AUREA vs JPEG -->
+<div class="metrics-row" id="metricsRow">
+  <!-- AUREA metrics -->
+  <div class="metrics-card">
+    <div class="metrics-card-title aurea-title">AUREA</div>
+    <div class="metrics-inner">
+      <div class="metric">
+        <div class="metric-value aurea-val" id="aureaSize">—</div>
+        <div class="metric-label">Size</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value aurea-val" id="aureaRatio">—</div>
+        <div class="metric-label">Ratio</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value aurea-val" id="aureaPsnr">—</div>
+        <div class="metric-label">PSNR</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- JPEG metrics -->
+  <div class="metrics-card">
+    <div class="metrics-card-title jpeg-title">JPEG</div>
+    <div class="metrics-inner">
+      <div class="metric">
+        <div class="metric-value jpeg-val" id="jpegSize">—</div>
+        <div class="metric-label">Size</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value jpeg-val" id="jpegRatio">—</div>
+        <div class="metric-label">Ratio</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value jpeg-val" id="jpegPsnr">—</div>
+        <div class="metric-label">PSNR</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delta badges -->
+<div class="delta-row" id="deltaRow">
+  <div class="delta-badge neutral" id="deltaSizeBadge">—</div>
+  <div class="delta-badge neutral" id="deltaPsnrBadge">—</div>
+</div>
+
+<!-- Demo notice -->
+<div class="demo-notice" id="demoNotice">
+  ⚙ Generate comparison images with:
+  <code>python generate_comparisons.py --input-dir ./sources -o ./docs/images --js-config</code>
+</div>
+
+<!-- Footer -->
+<footer class="footer">
+  <a href="https://github.com/5ymph0en1x/Aurea" target="_blank" rel="noopener">GitHub</a>
+  <span class="sep">·</span>
+  <a href="https://github.com/5ymph0en1x/Aurea/releases" target="_blank" rel="noopener">v0.4.0</a>
+  <span class="sep">·</span>
+  <a href="https://github.com/5ymph0en1x/Aurea/blob/main/README.md" target="_blank" rel="noopener">Docs</a>
+  <p>Built with φ — no JPEG fork, no borrowed architecture.</p>
+</footer>
+
+<script>
+// =====================================================================
+// IMAGE DATA — Edit this or load from images_config.json
+// =====================================================================
+//
+// Two ways to populate:
+//   1. Edit the IMAGES array below manually
+//   2. Run generate_comparisons.py --js-config and paste the output
+//      (or the script auto-generates images_config.json which this
+//       page can fetch at runtime — see loadConfigFromJson below)
+
+const IMAGES = [
+  {
+    name: "phoenix",
+    label: "Phoenix",
+    original:      "images/phoenix_original.png",
+    aurea: {
+      20: "images/phoenix_aurea_q20.png",
+      50: "images/phoenix_aurea_q50.png",
+      95: "images/phoenix_aurea_q95.png",
+    },
+    jpeg: {
+      20: "images/phoenix_jpeg_q20.png",
+      50: "images/phoenix_jpeg_q50.png",
+      95: "images/phoenix_jpeg_q95.png",
+    },
+    metrics_aurea: {
+      20: { size: "—", ratio: "—", psnr: "—" },
+      50: { size: "—", ratio: "—", psnr: "—" },
+      95: { size: "—", ratio: "—", psnr: "—" },
+    },
+    metrics_jpeg: {
+      20: { size: "—", ratio: "—", psnr: "—" },
+      50: { size: "—", ratio: "—", psnr: "—" },
+      95: { size: "—", ratio: "—", psnr: "—" },
+    },
+  },
+  {
+    name: "agree",
+    label: "Agree",
+    original:      "images/agree_original.png",
+    aurea: {
+      20: "images/agree_aurea_q20.png",
+      50: "images/agree_aurea_q50.png",
+      95: "images/agree_aurea_q95.png",
+    },
+    jpeg: {
+      20: "images/agree_jpeg_q20.png",
+      50: "images/agree_jpeg_q50.png",
+      95: "images/agree_jpeg_q95.png",
+    },
+    metrics_aurea: {
+      20: { size: "—", ratio: "—", psnr: "—" },
+      50: { size: "—", ratio: "—", psnr: "—" },
+      95: { size: "—", ratio: "—", psnr: "—" },
+    },
+    metrics_jpeg: {
+      20: { size: "—", ratio: "—", psnr: "—" },
+      50: { size: "—", ratio: "—", psnr: "—" },
+      95: { size: "—", ratio: "—", psnr: "—" },
+    },
+  },
+  {
+    name: "kodim23",
+    label: "Kodim 23",
+    original:      "images/kodim23_original.png",
+    aurea: {
+      20: "images/kodim23_aurea_q20.png",
+      50: "images/kodim23_aurea_q50.png",
+      95: "images/kodim23_aurea_q95.png",
+    },
+    jpeg: {
+      20: "images/kodim23_jpeg_q20.png",
+      50: "images/kodim23_jpeg_q50.png",
+      95: "images/kodim23_jpeg_q95.png",
+    },
+    metrics_aurea: {
+      20: { size: "—", ratio: "—", psnr: "—" },
+      50: { size: "—", ratio: "—", psnr: "—" },
+      95: { size: "—", ratio: "—", psnr: "—" },
+    },
+    metrics_jpeg: {
+      20: { size: "—", ratio: "—", psnr: "—" },
+      50: { size: "—", ratio: "—", psnr: "—" },
+      95: { size: "—", ratio: "—", psnr: "—" },
+    },
+  },
+];
+
+// =====================================================================
+// STATE
+// =====================================================================
+let currentImage   = 0;
+let currentQuality = 50;
+let currentMode    = "aurea";   // "aurea" | "jpeg" | "versus"
+let sliderPos      = 0.618;    // φ⁻¹
+let isDragging     = false;
+
+// =====================================================================
+// DOM REFS
+// =====================================================================
+const comparison   = document.getElementById('comparison');
+const imgBase      = document.getElementById('imgBase');
+const imgOverlay   = document.getElementById('imgOverlay');
+const sliderLine   = document.getElementById('sliderLine');
+const sliderHandle = document.getElementById('sliderHandle');
+const labelLeft    = document.getElementById('labelLeft');
+const labelRight   = document.getElementById('labelRight');
+const qualitySelect = document.getElementById('qualitySelect');
+const imageSelector = document.getElementById('imageSelector');
+const hintEl       = document.getElementById('hint');
+
+// Metric elements
+const el = (id) => document.getElementById(id);
+
+// =====================================================================
+// IMAGE SELECTOR
+// =====================================================================
+IMAGES.forEach((img, idx) => {
+  const btn = document.createElement('button');
+  btn.textContent = img.label;
+  btn.addEventListener('click', () => selectImage(idx));
+  if (idx === 0) btn.classList.add('active');
+  imageSelector.appendChild(btn);
+});
+
+function selectImage(idx) {
+  currentImage = idx;
+  document.querySelectorAll('#imageSelector button').forEach((b, i) => {
+    b.classList.toggle('active', i === idx);
+  });
+  loadView();
+}
+
+// =====================================================================
+// QUALITY SELECTOR
+// =====================================================================
+qualitySelect.addEventListener('change', (e) => {
+  currentQuality = parseInt(e.target.value);
+  loadView();
+});
+
+// =====================================================================
+// MODE TOGGLE (Original↔AUREA / Original↔JPEG / AUREA↔JPEG)
+// =====================================================================
+document.querySelectorAll('#modeToggle button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#modeToggle button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentMode = btn.dataset.mode;
+    loadView();
+  });
+});
+
+// =====================================================================
+// LOAD VIEW — sets images, labels, slider colors, metrics
+// =====================================================================
+function loadView() {
+  const img = IMAGES[currentImage];
+  const q   = currentQuality;
+
+  // Determine which images go on which side
+  // LEFT side = overlay (clipped), RIGHT side = base (full)
+  let leftSrc, rightSrc, leftLabel, rightLabel;
+
+  switch (currentMode) {
+    case "aurea":
+      // LEFT: AUREA, RIGHT: Original
+      leftSrc    = img.aurea[q];
+      rightSrc   = img.original;
+      leftLabel  = "AUREA";
+      rightLabel = "Original";
+      break;
+
+    case "jpeg":
+      // LEFT: JPEG, RIGHT: Original
+      leftSrc    = img.jpeg[q];
+      rightSrc   = img.original;
+      leftLabel  = "JPEG";
+      rightLabel = "Original";
+      break;
+
+    case "versus":
+      // LEFT: AUREA, RIGHT: JPEG
+      leftSrc    = img.aurea[q];
+      rightSrc   = img.jpeg[q];
+      leftLabel  = "AUREA";
+      rightLabel = "JPEG";
+      break;
+  }
+
+  imgOverlay.src = leftSrc  || img.original;
+  imgBase.src    = rightSrc || img.original;
+
+  // Update labels
+  labelLeft.textContent = leftLabel;
+  labelRight.textContent = rightLabel;
+
+  // Style the right label differently for versus mode
+  labelRight.classList.toggle('versus-jpeg', currentMode === 'versus');
+
+  // Update left label color for JPEG mode
+  if (currentMode === 'jpeg') {
+    labelLeft.style.background = 'rgba(91, 140, 184, 0.12)';
+    labelLeft.style.color = 'var(--blue-light)';
+    labelLeft.style.borderColor = 'rgba(91, 140, 184, 0.3)';
+  } else {
+    labelLeft.style.background = '';
+    labelLeft.style.color = '';
+    labelLeft.style.borderColor = '';
+  }
+
+  // Update slider colors
+  sliderLine.className   = `slider-line mode-${currentMode}`;
+  sliderHandle.className = `slider-handle mode-${currentMode}`;
+
+  // Update hint text
+  const hintTexts = {
+    aurea:  "⟵ AUREA · drag to compare · Original ⟶",
+    jpeg:   "⟵ JPEG · drag to compare · Original ⟶",
+    versus: "⟵ AUREA · drag to compare · JPEG ⟶",
+  };
+  hintEl.textContent = hintTexts[currentMode];
+
+  // Update metrics
+  updateMetrics(img, q);
+  updateSlider();
+}
+
+// =====================================================================
+// METRICS
+// =====================================================================
+function updateMetrics(img, q) {
+  const ma = img.metrics_aurea?.[q] || {};
+  const mj = img.metrics_jpeg?.[q]  || {};
+
+  el('aureaSize').textContent  = ma.size  || "—";
+  el('aureaRatio').textContent = ma.ratio || "—";
+  el('aureaPsnr').textContent  = ma.psnr  ? ma.psnr + " dB" : "—";
+
+  el('jpegSize').textContent   = mj.size  || "—";
+  el('jpegRatio').textContent  = mj.ratio || "—";
+  el('jpegPsnr').textContent   = mj.psnr  ? mj.psnr + " dB" : "—";
+
+  // Delta badges: compare AUREA vs JPEG
+  updateDeltaBadges(ma, mj);
+}
+
+function updateDeltaBadges(ma, mj) {
+  const sizeBadge = el('deltaSizeBadge');
+  const psnrBadge = el('deltaPsnrBadge');
+
+  // Parse ratio strings like "42.1:1" to get the numeric part
+  const parseRatio = (r) => {
+    if (!r || r === "—") return null;
+    return parseFloat(r.replace(":1", ""));
+  };
+
+  const aureaRatio = parseRatio(ma.ratio);
+  const jpegRatio  = parseRatio(mj.ratio);
+  const aureaPsnr  = ma.psnr && ma.psnr !== "—" ? parseFloat(ma.psnr) : null;
+  const jpegPsnr   = mj.psnr && mj.psnr !== "—" ? parseFloat(mj.psnr) : null;
+
+  // Size comparison: higher ratio = smaller file = better
+  if (aureaRatio !== null && jpegRatio !== null) {
+    const pct = ((aureaRatio - jpegRatio) / jpegRatio * 100).toFixed(1);
+    if (aureaRatio > jpegRatio) {
+      sizeBadge.textContent = `Size: AUREA ${Math.abs(pct)}% smaller`;
+      sizeBadge.className = "delta-badge win";
+    } else if (aureaRatio < jpegRatio) {
+      sizeBadge.textContent = `Size: JPEG ${Math.abs(pct)}% smaller`;
+      sizeBadge.className = "delta-badge loss";
+    } else {
+      sizeBadge.textContent = "Size: identical";
+      sizeBadge.className = "delta-badge neutral";
+    }
+  } else {
+    sizeBadge.textContent = "—";
+    sizeBadge.className = "delta-badge neutral";
+  }
+
+  // PSNR comparison: higher = better
+  if (aureaPsnr !== null && jpegPsnr !== null) {
+    const diff = (aureaPsnr - jpegPsnr).toFixed(2);
+    if (aureaPsnr > jpegPsnr) {
+      psnrBadge.textContent = `PSNR: AUREA +${diff} dB`;
+      psnrBadge.className = "delta-badge win";
+    } else if (aureaPsnr < jpegPsnr) {
+      psnrBadge.textContent = `PSNR: JPEG +${Math.abs(diff)} dB`;
+      psnrBadge.className = "delta-badge loss";
+    } else {
+      psnrBadge.textContent = "PSNR: identical";
+      psnrBadge.className = "delta-badge neutral";
+    }
+  } else {
+    psnrBadge.textContent = "—";
+    psnrBadge.className = "delta-badge neutral";
+  }
+}
+
+// =====================================================================
+// SLIDER LOGIC
+// =====================================================================
+function updateSlider() {
+  const pct = sliderPos * 100;
+  sliderLine.style.left   = pct + '%';
+  sliderHandle.style.left = pct + '%';
+  imgOverlay.style.clipPath = `inset(0 ${100 - pct}% 0 0)`;
+}
+
+function getSliderX(e) {
+  const rect = comparison.getBoundingClientRect();
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+}
+
+// Mouse
+comparison.addEventListener('mousedown', (e) => {
+  isDragging = true;
+  comparison.classList.add('dragging');
+  sliderPos = getSliderX(e);
+  updateSlider();
+});
+window.addEventListener('mousemove', (e) => {
+  if (!isDragging) return;
+  sliderPos = getSliderX(e);
+  updateSlider();
+});
+window.addEventListener('mouseup', () => {
+  isDragging = false;
+  comparison.classList.remove('dragging');
+});
+
+// Touch
+comparison.addEventListener('touchstart', (e) => {
+  isDragging = true;
+  comparison.classList.add('dragging');
+  sliderPos = getSliderX(e);
+  updateSlider();
+}, { passive: true });
+window.addEventListener('touchmove', (e) => {
+  if (!isDragging) return;
+  sliderPos = getSliderX(e);
+  updateSlider();
+}, { passive: true });
+window.addEventListener('touchend', () => {
+  isDragging = false;
+  comparison.classList.remove('dragging');
+});
+
+// =====================================================================
+// OPTIONAL: Auto-load images_config.json if present
+// =====================================================================
+async function tryLoadConfig() {
+  try {
+    const resp = await fetch('images/images_config.json');
+    if (!resp.ok) return;
+    const config = await resp.json();
+    // Merge config into IMAGES array
+    IMAGES.length = 0;
+    config.forEach(entry => IMAGES.push(entry));
+    // Rebuild image selector buttons
+    imageSelector.innerHTML = '';
+    IMAGES.forEach((img, idx) => {
+      const btn = document.createElement('button');
+      btn.textContent = img.label;
+      btn.addEventListener('click', () => selectImage(idx));
+      if (idx === 0) btn.classList.add('active');
+      imageSelector.appendChild(btn);
+    });
+    // Hide demo notice since real data is loaded
+    document.getElementById('demoNotice').style.display = 'none';
+    loadView();
+  } catch {
+    // No config file, use hardcoded IMAGES — that's fine
+  }
+}
+
+// =====================================================================
+// INIT
+// =====================================================================
+tryLoadConfig().then(() => loadView());
+</script>
+
+</body>
+</html>
