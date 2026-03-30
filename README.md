@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
 [![Showcase](https://img.shields.io/badge/Live_Showcase-5ymph0en1x.github.io-blue)](https://5ymph0en1x.github.io/Aurea/)
 
-AUREA is an experimental image codec that replaces JPEG's 1992-era Huffman tables and fixed 8x8 blocks with a modern pipeline: variable-size Lapped Orthogonal Transform (8/16/32), psychovisual Turing saliency fields, Chroma-from-Luma prediction, and rANS entropy coding with Exp-Golomb magnitudes.
+AUREA is an experimental image codec that replaces JPEG's 1992-era Huffman tables and fixed 8x8 blocks with a modern pipeline: variable-size Lapped Orthogonal Transform (8/16/32), psychovisual Turing saliency fields, Chroma-from-Luma prediction, trellis rate-distortion optimization, and rANS entropy coding with Exp-Golomb magnitudes.
 
 On the standard **Kodak 24** benchmark, AUREA v12 achieves **-5.9% BD-Rate vs JPEG** (22/24 images won), while retaining full **4:4:4 chroma** resolution — no color subsampling, no chroma bleeding.
 
@@ -73,20 +73,38 @@ This produces a per-block quantization modulation: edges get finer quantization 
 
 A **psychovisual pivot** adapts behavior to bitrate: at low quality, gamma > 0 preserves edges; at high quality, gamma < 0 protects smooth areas (anti-banding). The transition uses a cubic smoothstep.
 
-### 4. Quantization
+### 4. Bayesian Predictive Hierarchy
+
+The Turing field feeds a 4-level Bayesian hierarchy that enriches the entire pipeline:
+
+- **Level 0**: DC grid (existing, transmitted in the bitstream)
+- **Level 1**: Turing morphogenesis field (zero-bit, reconstructed identically on both sides from the DC grid)
+- **Level 2**: Primitive matching — contour ridges are traced from the Turing field and matched against geometric primitives (segments, arcs); only surprise primitives cost bits
+- **Level 3**: rANS entropy coding with Bayesian priors — 128 zero-probability contexts (run_class x prev_nz x energy_bucket x turing_bucket) replace the earlier 32-context model, giving the entropy coder direct awareness of local image complexity
+
+The hierarchy also provides per-block **gradient angles and strengths** from the inhibitor field, used to rotate the QMAT along dominant edge directions. Blocks whose gradient strength exceeds a calibrated threshold receive a frequency weighting matrix aligned with the local edge, concentrating bits where they matter most perceptually.
+
+### 5. Quantization
 
 Each AC coefficient receives a custom quantization step:
 
 ```
 step = detail_step * lot_factor * QMAT[freq] * CSF(freq, luminance)
-     * foveal(block) * turing_mod(block) * chroma_factor
+     * foveal(block) * turing_mod(block) * tRNA(block) * chroma_factor
 ```
 
-- **QMAT**: 16x16 frequency weighting matrix, with quality-adaptive power (0.55 at low Q, 0.05 at high Q via smoothstep)
+- **QMAT**: 16x16 frequency weighting matrix derived from pi and phi constants (LPIPS-calibrated), with quality-adaptive power (0.55 at low Q, 0.05 at high Q via smoothstep). Optionally rotated to align with the block's dominant gradient direction.
 - **CSF**: Contrast sensitivity — dark regions tolerate coarser HF quantization
+- **tRNA** (Weber-Fechner luminance allocation): per-block step factor based on average luminance zone (dark regions get finer quantization to match human sensitivity, bright regions get coarser)
 - **Dead zone**: Quality-adaptive (0.22 at Q<=70, ramps to 0.02 at Q=100), with a frequency-dependent floor for the last 25% of zigzag order (sensor noise suppression)
 
-### 5. Chroma-from-Luma Prediction (CfL)
+### 6. Trellis Rate-Distortion Optimization
+
+A Viterbi trellis optimizes each block's quantization decisions by minimizing J = D + lambda * R, where D is the sum of squared transform-domain errors and R is the estimated entropy cost from the rANS v12 context model. The trellis explores alternative quantization levels at each coefficient position, using context model snapshots captured during a greedy forward pass for accurate rate estimation.
+
+The Lagrange multiplier lambda is quality-adaptive: aggressive RDO at low quality (zeroing marginal coefficients that would cost more bits than they save), gentle at high quality to preserve fine detail. Trellis is disabled above Q=90 where near-lossless preservation dominates. The decoder is completely unchanged — trellis only affects encoder-side quantization decisions within the existing bitstream format.
+
+### 7. Chroma-from-Luma Prediction (CfL)
 
 For each block, a least-squares regression estimates alpha = sum(L*C) / sum(L*L) in the **AC frequency domain** (not spatial):
 
@@ -96,14 +114,14 @@ For each block, a least-squares regression estimates alpha = sum(L*C) / sum(L*L)
 
 This exploits the LOT's linearity: LOT(C - alpha*L) = LOT(C) - alpha*LOT(L).
 
-### 6. Entropy Coding (rANS v12)
+### 8. Entropy Coding (rANS v12)
 
 All streams use **range Asymmetric Numeral Systems** with Exp-Golomb magnitude coding:
 
 | Stream | Encoding |
 |--------|----------|
 | DC grid | Golden DPCM prediction + rANS v12 |
-| AC coefficients | Zigzag scan + EOB truncation + rANS v12 |
+| AC coefficients | Zigzag scan + EOB truncation + trellis RDO + rANS v12 |
 | EOB positions | DPCM delta + rANS v12 |
 | CfL metadata | Flags + alpha indices packed + rANS v12 |
 | Block map | Size codes (0/1/2) + rANS v12 |
@@ -111,6 +129,14 @@ All streams use **range Asymmetric Numeral Systems** with Exp-Golomb magnitude c
 The **Golden DPCM** prediction for DC: `pred = (phi^-1 * left + phi^-2 * top + phi^-3 * diag) / sum`.
 
 **Exp-Golomb order 0** for AC magnitudes >= 2: encodes value n as floor(log2(n+1)) zero bits + binary suffix. Far more efficient than unary for the Laplacian-tailed coefficient distribution.
+
+The v12 context model uses a **128-entry P(zero) table** indexed by (run_class x prev_nz x energy_bucket x turing_bucket) and a **32-entry P(pm1|nonzero) table** indexed by (energy_bucket x prev_was_pm1 x turing_bucket). An IIR energy filter (alpha = 218/256, tau ~ 6.75 symbols) tracks local coefficient magnitude through the zigzag scan, creating implicit frequency awareness without explicit position coding.
+
+### 9. Post-Processing
+
+The decoder applies **Contrast Adaptive Sharpening** (CAS) on the luminance plane to recover detail lost to quantization. CAS adjusts sharpening locally based on the contrast of each pixel's cross-shaped neighborhood, avoiding halos and overshoot. An edge-aware variant (CASP) uses Sobel-based attenuation to protect strong edges while boosting texture in smooth areas.
+
+An optional encoder-side **SPresso prefilter** suppresses chaotic micro-details before transform, improving entropy coding efficiency without blurring edges (median-based edge-preserving smoothing with a conservative blend).
 
 ---
 
@@ -197,21 +223,24 @@ Aurea/
   src/
     core/             # Core codec library (aurea-core)
       aurea_encoder.rs  # v12 encoder pipeline
-      lib.rs            # Decoder routing (v3, v10, v12)
+      lib.rs            # Decoder routing (v12)
       lot.rs            # Lapped Orthogonal Transform (8/16/32, cosine LUT, rayon)
-      rans.rs           # rANS entropy coder (v1 + v12 Exp-Golomb)
+      rans.rs           # rANS entropy coder (v12 Bayesian Exp-Golomb)
       turing.rs         # Turing morphogenesis field (DoG saliency)
+      hierarchy.rs      # Bayesian predictive hierarchy orchestration (4 levels)
+      trellis.rs        # Trellis RDO (Viterbi rate-distortion optimization)
       cfl.rs            # Chroma-from-Luma AC-domain prediction
-      hierarchy.rs      # Bayesian predictive hierarchy orchestration
       calibration.rs    # Quality-adaptive parameters and calibrated constants
       color.rs          # Golden Color Transform (4:4:4, rayon)
-      spin.rs           # Fibonacci spectral spin (decoder refinement)
-      dsp.rs            # Signal processing (Gaussian blur, anti-ring)
+      postprocess.rs    # Post-decode sharpening (CAS, XSharpen, SPresso)
+      error.rs          # Typed codec error handling (AureaError)
+      dsp.rs            # Signal processing (Gaussian blur, anti-ring, CASP)
       golden.rs         # Phi constants and PTF
       scan.rs           # Zigzag and golden spiral scan orders
       scene_analysis.rs # DC-based scene classification
       geometric.rs      # Geometric primitives (phi-frequency superstrings)
-      polymerase.rs     # DNA-inspired structural sequencing
+      codec_params.rs   # Centralized codec parameter structs
+      bitstream.rs      # AUR2 header and bitstream serialization
     cli/              # Command-line interface
     viewer/           # GUI viewer (native Windows)
     shell/            # Windows Explorer extension (COM/WIC)
@@ -228,102 +257,107 @@ flowchart TD
     classDef bitstream fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
     classDef zeroCost fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,stroke-dasharray: 5 5;
     classDef highlight fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;
+    classDef rdo fill:#fce4ec,stroke:#c62828,stroke-width:2px;
 
     %% ================= ENCODER PIPELINE =================
-    subgraph ENCODER ["ENCODER PIPELINE (Left)"]
+    subgraph ENCODER ["ENCODER PIPELINE"]
         direction TB
-        E_RGB["RGB Image (W × H × 3)"]:::encoder
-        
+        E_RGB["RGB Image (W x H x 3)"]:::encoder
+
         %% Stage 1
-        E_GCT["S1: Golden Color Transform (GCT)\nL_φ, C1, C2 using φ"]:::highlight
+        E_GCT["S1: Golden Color Transform (GCT)\nL_phi, C1, C2 using phi"]:::highlight
         E_RGB --> E_GCT
         E_GCT --> E_C1["C1 Plane (4:4:4)"]:::encoder
         E_GCT --> E_C2["C2 Plane (4:4:4)"]:::encoder
         E_GCT --> E_PTF["S1: Perceptual Transfer Function\nExpands dark levels"]:::encoder
         E_PTF --> E_Scene["Scene Analysis\n(step_factor)"]:::encoder
-        
+
         %% Stage 2
         E_PTF --> E_Block["S2: Variable Block Classification\n(8x8 to 32x32)"]:::encoder
         E_C1 --> E_Block
         E_C2 --> E_Block
         E_Block --> E_LOT["S2: Lapped Orthogonal Transform\nForward 2D DCT-II"]:::encoder
-        
+
         E_LOT --> E_DC["DC Grid (1 per block)"]:::encoder
-        E_LOT --> E_AC["AC Blocks (N²-1 per block)"]:::encoder
-        
+        E_LOT --> E_AC["AC Blocks (N^2-1 per block)"]:::encoder
+
         %% Stage 3 & 4
         E_DC --> E_DC_Q["S3: Dead-zone Quantization"]:::encoder
         E_DC_Q --> E_DPCM["S3: Golden DPCM Prediction"]:::highlight
         E_DPCM --> E_DC_Entropy["S3: rANS v12 Entropy Coding"]:::encoder
-        
+
         E_DC --> E_Turing["S4: Turing Morphogenesis Field\n(Zero-bit Saliency, DoG)"]:::zeroCost
-        E_Turing --> E_Pivot["Psychovisual Turing Pivot\n(Quality adaptive mod)"]:::zeroCost
-        
+        E_Turing --> E_Hierarchy["S4: Bayesian Hierarchy\n(Turing buckets, gradient angles)"]:::zeroCost
+        E_Hierarchy --> E_Pivot["Psychovisual Turing Pivot\n(Quality adaptive mod)"]:::zeroCost
+
         %% Stage 5
-        E_AC --> E_AC_Q["S5: AC Quantization\nFreq, CSF, Foveal, Turing mods"]:::encoder
+        E_AC --> E_AC_Q["S5: AC Quantization\nFreq, CSF, tRNA, Foveal,\nTuring mods, QMAT rotation"]:::encoder
         E_Pivot --> E_AC_Q
-        E_AC_Q --> E_Zigzag["Zigzag Scan & EOB Truncation"]:::encoder
-        
+        E_AC_Q --> E_Trellis["S5: Trellis RDO (Viterbi)\nJ = D + lambda * R"]:::rdo
+        E_Trellis --> E_Zigzag["Zigzag Scan & EOB Truncation"]:::encoder
+
         %% Stage 6
         E_Zigzag --> E_CfL["S6: Chroma-from-Luma (CfL)\nPrediction in AC domain"]:::encoder
-        
+
         %% Stage 7
         E_CfL --> E_Entropy["S7: rANS v12 Assembly\n(EOB, AC, CfL, Map)"]:::encoder
     end
 
     %% ================= BITSTREAM =================
-    subgraph BITSTREAM ["AUR2 BITSTREAM (Center)"]
+    subgraph BITSTREAM ["AUR2 BITSTREAM"]
         direction TB
         B_Head["AUR2 Header (39 bytes)\nMagic, Version, Q, Dims"]:::bitstream
         B_Pre["Body Preamble\nChroma dims, Turing Params, Map"]:::bitstream
-        B_Ch0["Channel 0: Luma (L_φ)\nDC, EOB, AC"]:::bitstream
+        B_Ch0["Channel 0: Luma (L_phi)\nDC, EOB, AC"]:::bitstream
         B_Ch1["Channel 1: C1 (Blue-Yellow)\nDC, CfL, EOB, AC"]:::bitstream
         B_Ch2["Channel 2: C2 (Red-Cyan)\nDC, CfL, EOB, AC"]:::bitstream
-        
+
         B_Head --> B_Pre --> B_Ch0 --> B_Ch1 --> B_Ch2
     end
 
     %% ================= DECODER PIPELINE =================
-    subgraph DECODER ["DECODER PIPELINE (Right)"]
+    subgraph DECODER ["DECODER PIPELINE"]
         direction TB
-        
+
         %% Stage D1
         D_Parse["D1: Bitstream Parsing"]:::decoder
-        
+
         %% Stage D2
         D_Parse --> D_DC_Dec["D2: rANS v12 Decode (DC)"]:::decoder
         D_DC_Dec --> D_DPCM_Inv["D2: Golden DPCM Inverse"]:::highlight
         D_DPCM_Inv --> D_DC_Recon["D2: Dequantize DC"]:::decoder
-        
+
         %% Stage D3
         D_DC_Recon --> D_Turing["D3: Turing Field Recon\n(Identical to Encoder)"]:::zeroCost
-        
+        D_Turing --> D_Hierarchy["D3: Bayesian Hierarchy Recon\n(Turing buckets, gradients)"]:::zeroCost
+
         %% Stage D4
         D_Parse --> D_AC_Dec["D4: rANS v12 Decode (AC/EOB)"]:::decoder
         D_AC_Dec --> D_AC_Scatter["D4: Scatter & Zero-fill"]:::decoder
-        D_Turing --> D_AC_Dequant["D4: Dequantize AC\n(Exact mirror)"]:::decoder
+        D_Hierarchy --> D_AC_Dequant["D4: Dequantize AC\n(Exact mirror)"]:::decoder
         D_AC_Scatter --> D_AC_Dequant
-        
+
         %% Stage D5
         D_Parse --> D_CfL_Dec["D5: rANS v12 Decode (CfL)"]:::decoder
-        D_AC_Dequant --> D_CfL_Apply["D5: CfL Reconstruction\nC_ac = res + α·L_rec"]:::decoder
+        D_AC_Dequant --> D_CfL_Apply["D5: CfL Reconstruction\nC_ac = res + alpha * L_rec"]:::decoder
         D_CfL_Dec --> D_CfL_Apply
-        
+
         %% Stage D6
         D_DC_Recon --> D_LOT_Inv["D6: LOT Synthesis\nInverse 2D DCT-II"]:::decoder
         D_CfL_Apply --> D_LOT_Inv
         D_LOT_Inv --> D_Overlap["D6: Sine Window &\nOverlap-Add Accumulation"]:::decoder
-        
+
         %% Stage D7
         D_Overlap --> D_PTF_Inv["D7: Inverse PTF"]:::decoder
-        D_PTF_Inv --> D_GCT_Inv["D7: Inverse Golden Color Transform"]:::highlight
+        D_PTF_Inv --> D_Post["D7: Post-Processing\n(CAS / CASP sharpening)"]:::decoder
+        D_Post --> D_GCT_Inv["D7: Inverse Golden Color Transform"]:::highlight
         D_GCT_Inv --> D_RGB["RGB Image Output"]:::decoder
     end
 
     %% ================= CONNECTIONS ACROSS COLUMNS =================
     E_DC_Entropy --> B_Ch0
     E_Entropy --> B_Ch0
-    
+
     B_Ch2 --> D_Parse
 ```
 
