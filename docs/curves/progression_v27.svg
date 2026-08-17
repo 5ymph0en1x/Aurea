@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600" role="img" aria-labelledby="title desc">
+  <title id="title">AUR2 v25 to v27 progressive entropy gains</title>
+  <desc id="desc">Activity-keyed contexts, skeleton echo priming and layer-zero channel memory reduce rate while preserving every reconstructed pixel.</desc>
+  <rect width="960" height="600" fill="#ffffff"/>
+  <style>
+    .title { font:700 30px system-ui,sans-serif; fill:#171717 }
+    .sub { font:16px system-ui,sans-serif; fill:#5f6368 }
+    .step { font:700 22px system-ui,sans-serif; fill:#202124 }
+    .body { font:15px system-ui,sans-serif; fill:#4d5156 }
+    .value { font:700 20px ui-monospace,monospace; fill:#176b36 }
+    .tag { font:700 13px system-ui,sans-serif; fill:#176b36; letter-spacing:.5px }
+    .footer { font:700 17px system-ui,sans-serif; fill:#176b36 }
+  </style>
+  <text class="title" x="48" y="54">The progressive channel learns to remember</text>
+  <text class="sub" x="48" y="82">Mean rate change versus the preceding version · every stage is pixel-identical</text>
+
+  <rect x="48" y="118" width="272" height="340" rx="14" fill="#f7faf8" stroke="#d6e8dc"/>
+  <rect x="68" y="138" width="103" height="27" rx="13" fill="#e4f4e9"/>
+  <text class="tag" x="82" y="157">AUR2 v25</text>
+  <text class="step" x="68" y="203">Activity-keyed</text>
+  <text class="step" x="68" y="231">AC contexts</text>
+  <text class="body" x="68" y="270">EOB activity replaces the blind</text>
+  <text class="body" x="68" y="292">DC-gradient context bucket.</text>
+  <text class="value" x="68" y="348">rate  −0.430%</text>
+  <text class="value" x="68" y="382">48 / 48 points</text>
+  <text class="body" x="68" y="416">pixel-identical</text>
+
+  <rect x="344" y="118" width="272" height="340" rx="14" fill="#f7faf8" stroke="#d6e8dc"/>
+  <rect x="364" y="138" width="103" height="27" rx="13" fill="#e4f4e9"/>
+  <text class="tag" x="378" y="157">AUR2 v26</text>
+  <text class="step" x="364" y="203">Skeleton echo</text>
+  <text class="step" x="364" y="231">primes detail</text>
+  <text class="body" x="364" y="270">Layer 0's decoded low frequencies</text>
+  <text class="body" x="364" y="292">seed each detail layer's energy IIR.</text>
+  <text class="value" x="364" y="348">rate  −0.023%</text>
+  <text class="value" x="364" y="382">44 / 48 points</text>
+  <text class="body" x="364" y="416">zero extra bits</text>
+
+  <rect x="640" y="118" width="272" height="340" rx="14" fill="#f1f9f3" stroke="#bcdcc6"/>
+  <rect x="660" y="138" width="103" height="27" rx="13" fill="#d9f0e0"/>
+  <text class="tag" x="674" y="157">AUR2 v27</text>
+  <text class="step" x="660" y="203">Ionized channel</text>
+  <text class="step" x="660" y="231">memory</text>
+  <text class="body" x="660" y="270">Detail layers re-enter layer 0's</text>
+  <text class="body" x="660" y="292">converged adaptive coder state.</text>
+  <text class="value" x="660" y="348">rate  −0.210%</text>
+  <text class="value" x="660" y="382">47 / 48 points</text>
+  <text class="body" x="660" y="416">no measurable encode cost</text>
+
+  <path d="M320 288 L338 288" stroke="#71b887" stroke-width="4"/>
+  <path d="M616 288 L634 288" stroke="#71b887" stroke-width="4"/>
+  <rect x="48" y="492" width="864" height="72" rx="10" fill="#eaf6ed"/>
+  <text class="footer" x="70" y="522">Three semantic cycles: −0.663% from the post-recalibration frontier</text>
+  <text class="footer" x="70" y="549">v25 → v27 alone: −0.233% mean rate · 48/48 identical reconstructions</text>
+</svg>

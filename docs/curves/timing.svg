@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="500" viewBox="0 0 1100 500" role="img" aria-label="Temps moyens AUREA et JPEG">
+<title>Temps moyens AUREA et JPEG</title>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="35.00" y="42.00" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="24" font-weight="500" fill="#172033">Temps moyens par image — échelle logarithmique</text>
+<rect x="36" y="66" width="18" height="10" fill="#f97316"/>
+<text x="62.00" y="76.00" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="13" font-weight="400" fill="#172033">Encodage</text>
+<rect x="190" y="66" width="18" height="10" fill="#2563eb"/>
+<text x="216.00" y="76.00" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="13" font-weight="400" fill="#172033">Décodage</text>
+<rect x="190" y="105" width="860" height="325" fill="none" stroke="#dbe3ec"/>
+<line x1="758.00" y1="105" x2="758.00" y2="430" stroke="#dbe3ec"/>
+<text x="758.00" y="452.00" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="400" fill="#64748b">1 s</text>
+<text x="178.00" y="163.17" text-anchor="end" font-family="Segoe UI,Arial,sans-serif" font-size="12" font-weight="400" fill="#172033">AUREA v32</text>
+<rect x="190.00" y="140.17" width="788.16" height="14" fill="#f97316" opacity="0.88"/>
+<text x="985.16" y="151.17" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="400" fill="#172033">1.982 s</text>
+<rect x="190.00" y="164.17" width="725.99" height="14" fill="#2563eb" opacity="0.88"/>
+<text x="922.99" y="175.17" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="400" fill="#172033">1.634 s</text>
+<text x="178.00" y="271.50" text-anchor="end" font-family="Segoe UI,Arial,sans-serif" font-size="12" font-weight="400" fill="#172033">JPEG 4:2:0 opt.</text>
+<rect x="190.00" y="248.50" width="187.69" height="14" fill="#f97316" opacity="0.88"/>
+<text x="384.69" y="259.50" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="400" fill="#172033">0.307 s</text>
+<rect x="190.00" y="272.50" width="164.45" height="14" fill="#2563eb" opacity="0.88"/>
+<text x="361.45" y="283.50" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="400" fill="#172033">0.286 s</text>
+<text x="178.00" y="379.83" text-anchor="end" font-family="Segoe UI,Arial,sans-serif" font-size="12" font-weight="400" fill="#172033">JPEG 4:4:4 opt.</text>
+<rect x="190.00" y="356.83" width="321.17" height="14" fill="#f97316" opacity="0.88"/>
+<text x="518.17" y="367.83" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="400" fill="#172033">0.465 s</text>
+<rect x="190.00" y="380.83" width="231.68" height="14" fill="#2563eb" opacity="0.88"/>
+<text x="428.68" y="391.83" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="400" fill="#172033">0.352 s</text>
+</svg>
