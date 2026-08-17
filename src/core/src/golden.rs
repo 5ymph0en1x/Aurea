@@ -14,4 +14,3 @@ pub const PHI_INV3: f64 = 0.2360679774997897;
 /// giving perceptually uniform quantization (Weber-Fechner).
 pub const PTF_GAMMA: f64 = 0.65;
 pub const PTF_GAMMA_INV: f64 = 1.0 / PTF_GAMMA;
-

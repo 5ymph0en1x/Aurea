@@ -1,3 +1,5 @@
+use crate::calibration;
+use crate::turing::PredictedContour;
 /// Geometric module: primitives (segments, arcs) for wavelet detail band prediction.
 /// Encodes contours using geometric primitives + residual.
 ///
@@ -7,8 +9,6 @@
 /// - Arcs: sampling at the golden angle (137.5 degrees)
 use half::f16;
 use ndarray::Array2;
-use crate::turing::PredictedContour;
-use crate::calibration;
 
 /// Fibonacci force levels (natural logarithmic quantization).
 /// Perception follows Weber-Fechner: delta_perception = k * log(stimulus).
@@ -20,7 +20,9 @@ const FIB_FORCE_LEVELS: [i8; 8] = [1, 2, 3, 5, 8, 13, 21, 34];
 fn snap_to_fibonacci(force: f64) -> i8 {
     let abs_f = force.abs();
     let sign = if force >= 0.0 { 1i8 } else { -1i8 };
-    if abs_f < 0.5 { return 0; }
+    if abs_f < 0.5 {
+        return 0;
+    }
     let mut best = FIB_FORCE_LEVELS[0];
     let mut best_dist = (abs_f - best as f64).abs();
     for &level in &FIB_FORCE_LEVELS[1..] {
@@ -29,7 +31,9 @@ fn snap_to_fibonacci(force: f64) -> i8 {
             best = level;
             best_dist = dist;
         }
-        if level as f64 > abs_f * 2.0 { break; } // no need to search further
+        if level as f64 > abs_f * 2.0 {
+            break;
+        } // no need to search further
     }
     sign * best
 }
@@ -40,19 +44,16 @@ fn snap_to_fibonacci(force: f64) -> i8 {
 /// Index = angle in degrees / 5 (0..18 -> 0 to 90 degrees).
 /// Values = amplitude fraction (sqrt(energy)) per band.
 const CALIB_LH: [f64; 19] = [
-    1.0000, 0.9569, 0.9113, 0.8746, 0.8188, 0.7652, 0.7319, 0.6405,
-    0.5098, 0.3977, 0.4291, 0.4101, 0.4402, 0.4433, 0.4304, 0.3564,
-    0.2945, 0.2078, 0.1828,
+    1.0000, 0.9569, 0.9113, 0.8746, 0.8188, 0.7652, 0.7319, 0.6405, 0.5098, 0.3977, 0.4291, 0.4101,
+    0.4402, 0.4433, 0.4304, 0.3564, 0.2945, 0.2078, 0.1828,
 ];
 const CALIB_HL: [f64; 19] = [
-    0.0000, 0.2078, 0.2945, 0.3564, 0.4304, 0.4433, 0.4402, 0.4101,
-    0.4291, 0.4030, 0.5098, 0.6405, 0.7319, 0.7652, 0.8188, 0.8746,
-    0.9113, 0.9569, 0.9750,
+    0.0000, 0.2078, 0.2945, 0.3564, 0.4304, 0.4433, 0.4402, 0.4101, 0.4291, 0.4030, 0.5098, 0.6405,
+    0.7319, 0.7652, 0.8188, 0.8746, 0.9113, 0.9569, 0.9750,
 ];
 const CALIB_HH: [f64; 19] = [
-    0.0000, 0.2028, 0.2878, 0.3289, 0.3800, 0.4669, 0.5201, 0.6493,
-    0.7457, 0.8242, 0.7457, 0.6493, 0.5201, 0.4669, 0.3800, 0.3289,
-    0.2878, 0.2028, 0.1259,
+    0.0000, 0.2028, 0.2878, 0.3289, 0.3800, 0.4669, 0.5201, 0.6493, 0.7457, 0.8242, 0.7457, 0.6493,
+    0.5201, 0.4669, 0.3800, 0.3289, 0.2878, 0.2028, 0.1259,
 ];
 
 /// Interpolate the calibrated lookup table for a given angle.
@@ -60,7 +61,11 @@ const CALIB_HH: [f64; 19] = [
 fn calibrated_weights(theta: f64) -> (f64, f64, f64) {
     // Normalize theta to [0, pi/2] by symmetry
     let angle_deg = theta.abs().to_degrees() % 180.0;
-    let angle_norm = if angle_deg > 90.0 { 180.0 - angle_deg } else { angle_deg };
+    let angle_norm = if angle_deg > 90.0 {
+        180.0 - angle_deg
+    } else {
+        angle_deg
+    };
 
     // Fractional index in the table (5-degree step)
     let idx_f = angle_norm / 5.0;
@@ -84,9 +89,24 @@ fn calibrated_weights(theta: f64) -> (f64, f64, f64) {
 pub enum Primitive {
     /// Superstring segment: straight contour with phi oscillation.
     /// The force oscillates at 1/(2*phi) cycles/pixel along the segment.
-    Segment { x1: i16, y1: i16, x2: i16, y2: i16, amplitude: i8, phase: i8 },
+    Segment {
+        x1: i16,
+        y1: i16,
+        x2: i16,
+        y2: i16,
+        amplitude: i8,
+        phase: i8,
+    },
     /// Superstring arc: curved contour with phi oscillation.
-    Arc { cx: i16, cy: i16, radius: u16, theta_start: i8, theta_end: i8, amplitude: i8, phase: i8 },
+    Arc {
+        cx: i16,
+        cy: i16,
+        radius: u16,
+        theta_start: i8,
+        theta_end: i8,
+        amplitude: i8,
+        phase: i8,
+    },
 }
 
 /// Natural oscillation frequency of the CDF 9/7 filter: 1/(2*phi) cycles/pixel.
@@ -126,7 +146,7 @@ impl Primitive {
     pub fn byte_cost(&self) -> usize {
         match self {
             Primitive::Segment { .. } => 11, // 1(type) + 4*i16 + amplitude(i8) + phase(i8)
-            Primitive::Arc { .. } => 13,     // 1(type) + 2*i16 + u16 + 2*i8 + amplitude(i8) + phase(i8)
+            Primitive::Arc { .. } => 13, // 1(type) + 2*i16 + u16 + 2*i8 + amplitude(i8) + phase(i8)
         }
     }
 }
@@ -149,9 +169,12 @@ fn oscillating_force(amplitude: f64, phase: f64, pixel_index: usize) -> f64 {
 ///   HH (diagonals):                             force * |sin(theta) * cos(theta)|
 pub fn render_primitives(
     primitives: &[Primitive],
-    h_lh: usize, w_lh: usize,
-    h_hl: usize, w_hl: usize,
-    h_hh: usize, w_hh: usize,
+    h_lh: usize,
+    w_lh: usize,
+    h_hl: usize,
+    w_hl: usize,
+    h_hh: usize,
+    w_hh: usize,
 ) -> (Array2<f64>, Array2<f64>, Array2<f64>) {
     let mut lh = Array2::<f64>::zeros((h_lh, w_lh));
     let mut hl = Array2::<f64>::zeros((h_hl, w_hl));
@@ -159,7 +182,14 @@ pub fn render_primitives(
 
     for prim in primitives {
         match prim {
-            Primitive::Segment { x1, y1, x2, y2, amplitude, phase } => {
+            Primitive::Segment {
+                x1,
+                y1,
+                x2,
+                y2,
+                amplitude,
+                phase,
+            } => {
                 let dx = (*x2 - *x1) as f64;
                 let dy = (*y2 - *y1) as f64;
                 let theta = dy.atan2(dx);
@@ -179,7 +209,15 @@ pub fn render_primitives(
                     accumulate(&mut hh, py, px, f * w_hh_c, h_hh, w_hh);
                 }
             }
-            Primitive::Arc { cx, cy, radius, theta_start, theta_end, amplitude, phase } => {
+            Primitive::Arc {
+                cx,
+                cy,
+                radius,
+                theta_start,
+                theta_end,
+                amplitude,
+                phase,
+            } => {
                 let amp = *amplitude as f64;
                 let ph = *phase as f64 * std::f64::consts::PI / 128.0;
                 let ts = *theta_start as f64 * std::f64::consts::PI / 128.0;
@@ -235,10 +273,18 @@ fn bresenham_pixels(x1: i16, y1: i16, x2: i16, y2: i16) -> Vec<(i32, i32)> {
 
     loop {
         pixels.push((x1, y1));
-        if x1 == x2 && y1 == y2 { break; }
+        if x1 == x2 && y1 == y2 {
+            break;
+        }
         let e2 = 2 * err;
-        if e2 > -dy { err -= dy; x1 += sx; }
-        if e2 < dx  { err += dx; y1 += sy; }
+        if e2 > -dy {
+            err -= dy;
+            x1 += sx;
+        }
+        if e2 < dx {
+            err += dx;
+            y1 += sy;
+        }
     }
     pixels
 }
@@ -301,19 +347,27 @@ fn connected_components_8(mask: &[bool], h: usize, w: usize) -> (Vec<u32>, usize
     fn union(parent: &mut Vec<usize>, a: usize, b: usize) {
         let ra = find(parent, a);
         let rb = find(parent, b);
-        if ra != rb { parent[rb] = ra; }
+        if ra != rb {
+            parent[rb] = ra;
+        }
     }
 
     // 8-neighborhood connections: right, down, down-right, down-left
     for r in 0..h {
         for c in 0..w {
             let idx = r * w + c;
-            if !mask[idx] { continue; }
+            if !mask[idx] {
+                continue;
+            }
 
             // Right
-            if c + 1 < w && mask[idx + 1] { union(&mut parent, idx, idx + 1); }
+            if c + 1 < w && mask[idx + 1] {
+                union(&mut parent, idx, idx + 1);
+            }
             // Down
-            if r + 1 < h && mask[(r + 1) * w + c] { union(&mut parent, idx, (r + 1) * w + c); }
+            if r + 1 < h && mask[(r + 1) * w + c] {
+                union(&mut parent, idx, (r + 1) * w + c);
+            }
             // Down-right
             if r + 1 < h && c + 1 < w && mask[(r + 1) * w + c + 1] {
                 union(&mut parent, idx, (r + 1) * w + c + 1);
@@ -326,7 +380,9 @@ fn connected_components_8(mask: &[bool], h: usize, w: usize) -> (Vec<u32>, usize
     }
 
     // Full compression
-    for i in 0..n { find(&mut parent, i); }
+    for i in 0..n {
+        find(&mut parent, i);
+    }
 
     // Compact renumbering of roots
     let mut root_to_label = vec![u32::MAX; n];
@@ -334,7 +390,9 @@ fn connected_components_8(mask: &[bool], h: usize, w: usize) -> (Vec<u32>, usize
     let mut label_map = vec![u32::MAX; n];
 
     for i in 0..n {
-        if !mask[i] { continue; }
+        if !mask[i] {
+            continue;
+        }
         let root = parent[i];
         if root_to_label[root] == u32::MAX {
             root_to_label[root] = next_label;
@@ -354,15 +412,27 @@ fn connected_components_8(mask: &[bool], h: usize, w: usize) -> (Vec<u32>, usize
 /// Uses weighted PCA to find the principal direction.
 /// Returns (x1, y1, x2, y2, force) or None if too few points.
 fn fit_segment(points: &[(usize, usize, f64)]) -> Option<(i16, i16, i16, i16, f64, f64)> {
-    if points.len() < 3 { return None; }
+    if points.len() < 3 {
+        return None;
+    }
 
     // Weights = absolute value of amplitude
     let weights: Vec<f64> = points.iter().map(|(_, _, a)| a.abs().max(1e-9)).collect();
     let w_sum: f64 = weights.iter().sum();
 
     // Weighted center of mass (col = x, row = y)
-    let cx: f64 = points.iter().zip(&weights).map(|((_, c, _), w)| *c as f64 * w).sum::<f64>() / w_sum;
-    let cy: f64 = points.iter().zip(&weights).map(|((r, _, _), w)| *r as f64 * w).sum::<f64>() / w_sum;
+    let cx: f64 = points
+        .iter()
+        .zip(&weights)
+        .map(|((_, c, _), w)| *c as f64 * w)
+        .sum::<f64>()
+        / w_sum;
+    let cy: f64 = points
+        .iter()
+        .zip(&weights)
+        .map(|((r, _, _), w)| *r as f64 * w)
+        .sum::<f64>()
+        / w_sum;
 
     // Weighted covariance matrix
     let mut cxx = 0.0f64;
@@ -393,17 +463,26 @@ fn fit_segment(points: &[(usize, usize, f64)]) -> Option<(i16, i16, i16, i16, f6
         dir_x = (lambda_max - cyy) / norm;
         dir_y = cxy / norm;
     } else {
-        if cxx >= cyy { dir_x = 1.0; dir_y = 0.0; }
-        else          { dir_x = 0.0; dir_y = 1.0; }
+        if cxx >= cyy {
+            dir_x = 1.0;
+            dir_y = 0.0;
+        } else {
+            dir_x = 0.0;
+            dir_y = 1.0;
+        }
     }
 
     // Projection of points onto principal direction
-    let projections: Vec<f64> = points.iter()
+    let projections: Vec<f64> = points
+        .iter()
         .map(|(r, c, _)| (*c as f64 - cx) * dir_x + (*r as f64 - cy) * dir_y)
         .collect();
 
     let t_min = projections.iter().copied().fold(f64::INFINITY, f64::min);
-    let t_max = projections.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let t_max = projections
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let x1 = (cx + t_min * dir_x).round() as i16;
     let y1 = (cy + t_min * dir_y).round() as i16;
@@ -435,7 +514,9 @@ fn fit_segment(points: &[(usize, usize, f64)]) -> Option<(i16, i16, i16, i16, f6
 /// theta encoded as i8 * pi/128.
 /// Returns (cx, cy, radius, theta_start, theta_end, force) or None on failure.
 fn fit_arc(points: &[(usize, usize, f64)]) -> Option<(i16, i16, u16, i8, i8, f64)> {
-    if points.len() < 5 { return None; }
+    if points.len() < 5 {
+        return None;
+    }
 
     let n = points.len() as f64;
 
@@ -451,15 +532,29 @@ fn fit_arc(points: &[(usize, usize, f64)]) -> Option<(i16, i16, u16, i8, i8, f64
     // Moments for the Taubin method
     let zmean = zs.iter().sum::<f64>() / n;
 
-    let mut mxx = 0.0f64; let mut myy = 0.0f64; let mut mxy = 0.0f64;
-    let mut mxz = 0.0f64; let mut myz = 0.0f64; let mut mzz = 0.0f64;
+    let mut mxx = 0.0f64;
+    let mut myy = 0.0f64;
+    let mut mxy = 0.0f64;
+    let mut mxz = 0.0f64;
+    let mut myz = 0.0f64;
+    let mut mzz = 0.0f64;
     for i in 0..points.len() {
-        let u = us[i]; let v = vs[i]; let z = zs[i];
-        mxx += u * u; myy += v * v; mxy += u * v;
-        mxz += u * z; myz += v * z; mzz += z * z;
+        let u = us[i];
+        let v = vs[i];
+        let z = zs[i];
+        mxx += u * u;
+        myy += v * v;
+        mxy += u * v;
+        mxz += u * z;
+        myz += v * z;
+        mzz += z * z;
     }
-    mxx /= n; myy /= n; mxy /= n;
-    mxz /= n; myz /= n; mzz /= n;
+    mxx /= n;
+    myy /= n;
+    mxy /= n;
+    mxz /= n;
+    myz /= n;
+    mzz /= n;
 
     // Matrix M and Taubin constraint
     // Find the minimal eigenvector of M - eta * N
@@ -480,7 +575,7 @@ fn fit_arc(points: &[(usize, usize, f64)]) -> Option<(i16, i16, u16, i8, i8, f64
     // 3x3 normal matrix
     let s11 = mxx;
     let s12 = mxy;
-    let s13 = mxz / 2.0;  // sum(u * z) / n
+    let s13 = mxz / 2.0; // sum(u * z) / n
     let s22 = myy;
     let s23 = myz / 2.0;
     let s33 = mzz;
@@ -495,9 +590,11 @@ fn fit_arc(points: &[(usize, usize, f64)]) -> Option<(i16, i16, u16, i8, i8, f64
     // [sum(u),   sum(v),   n     ] [c]   [sum(z)/2  ]
     // centre = (a, b) + (mx, my), rayon = sqrt(a^2+b^2+c)
 
-    let su  = us.iter().sum::<f64>() / n;  // 0 car centrees
-    let sv  = vs.iter().sum::<f64>() / n;  // 0
-    let _su2 = mxx; let _sv2 = myy; let _suv = mxy;
+    let su = us.iter().sum::<f64>() / n; // 0 car centrees
+    let sv = vs.iter().sum::<f64>() / n; // 0
+    let _su2 = mxx;
+    let _sv2 = myy;
+    let _suv = mxy;
     let suz = mxz;
     let svz = myz;
     let sz2 = zmean;
@@ -513,7 +610,9 @@ fn fit_arc(points: &[(usize, usize, f64)]) -> Option<(i16, i16, u16, i8, i8, f64
     let _ = (s11, s12, s13, s22, s23, s33, su, sv, sz2); // silence warnings
 
     let det2 = mxx * myy - mxy * mxy;
-    if det2.abs() < 1e-12 { return None; }
+    if det2.abs() < 1e-12 {
+        return None;
+    }
 
     let a = (myy * suz / 2.0 - mxy * svz / 2.0) / det2;
     let b = (mxx * svz / 2.0 - mxy * suz / 2.0) / det2;
@@ -521,7 +620,9 @@ fn fit_arc(points: &[(usize, usize, f64)]) -> Option<(i16, i16, u16, i8, i8, f64
 
     // Rayon^2 = a^2 + b^2 + c
     let r2 = a * a + b * b + c;
-    if r2 <= 0.0 { return None; }
+    if r2 <= 0.0 {
+        return None;
+    }
     let radius = r2.sqrt();
 
     // Center in original coordinates
@@ -529,10 +630,13 @@ fn fit_arc(points: &[(usize, usize, f64)]) -> Option<(i16, i16, u16, i8, i8, f64
     let center_y = b + my;
 
     // Validation
-    if radius > 10000.0 || radius < 1.0 { return None; }
+    if radius > 10000.0 || radius < 1.0 {
+        return None;
+    }
 
     // Compute theta_start and theta_end angles
-    let angles: Vec<f64> = points.iter()
+    let angles: Vec<f64> = points
+        .iter()
         .map(|(r, c, _)| {
             let dy = *r as f64 - center_y;
             let dx = *c as f64 - center_x;
@@ -542,15 +646,17 @@ fn fit_arc(points: &[(usize, usize, f64)]) -> Option<(i16, i16, u16, i8, i8, f64
 
     // Find angular extent (min/max)
     let theta_start_f = angles.iter().copied().fold(f64::INFINITY, f64::min);
-    let theta_end_f   = angles.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let theta_end_f = angles.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
     // Encode as i8 * pi/128
     let encode_angle = |a: f64| -> i8 {
-        (a * 128.0 / std::f64::consts::PI).round().clamp(-128.0, 127.0) as i8
+        (a * 128.0 / std::f64::consts::PI)
+            .round()
+            .clamp(-128.0, 127.0) as i8
     };
 
     let theta_start = encode_angle(theta_start_f);
-    let theta_end   = encode_angle(theta_end_f);
+    let theta_end = encode_angle(theta_end_f);
 
     let cx = center_x.round() as i16;
     let cy = center_y.round() as i16;
@@ -576,9 +682,12 @@ pub fn extract_primitives(
     q_hl: &Array2<f64>,
     q_hh: &Array2<f64>,
 ) -> (Vec<Primitive>, Array2<f64>, Array2<f64>, Array2<f64>) {
-    let h_lh = q_lh.nrows(); let w_lh = q_lh.ncols();
-    let h_hl = q_hl.nrows(); let w_hl = q_hl.ncols();
-    let h_hh = q_hh.nrows(); let w_hh = q_hh.ncols();
+    let h_lh = q_lh.nrows();
+    let w_lh = q_lh.ncols();
+    let h_hl = q_hl.nrows();
+    let w_hl = q_hl.ncols();
+    let h_hh = q_hh.nrows();
+    let w_hh = q_hh.ncols();
 
     // Skip if bands are too small
     if h_lh * w_lh < 64 || h_hl * w_hl < 64 || h_hh * w_hh < 64 {
@@ -607,9 +716,13 @@ pub fn extract_primitives(
     //    Adaptive number of passes: larger images need more dilation
     //    (HD contours are more fragmented by quantization)
     let raw_mask: Vec<bool> = energy.iter().map(|&e| e > 0.5).collect();
-    let n_passes = if h_c * w_c > 500_000 { 4 }
-                   else if h_c * w_c > 100_000 { 3 }
-                   else { 2 };
+    let n_passes = if h_c * w_c > 500_000 {
+        4
+    } else if h_c * w_c > 100_000 {
+        3
+    } else {
+        2
+    };
     let dilated = dilate_mask(&raw_mask, h_c, w_c, n_passes);
 
     // 3. Connected components on the dilated mask
@@ -624,7 +737,9 @@ pub fn extract_primitives(
     let mut clusters: Vec<Vec<(usize, usize, f64)>> = vec![Vec::new(); n_comp];
     for idx in 0..h_c * w_c {
         let lbl = labels[idx];
-        if lbl == u32::MAX { continue; }
+        if lbl == u32::MAX {
+            continue;
+        }
         // Only keep pixels with real energy
         if energy[idx] > 0.5 {
             let r = idx / w_c;
@@ -636,22 +751,47 @@ pub fn extract_primitives(
     // 5. Fit clusters that are long enough (adaptive threshold)
     //    Break-even threshold: byte_cost * 8 / bits_saved_per_pixel
     //    Larger images have more long clusters dominating -> stricter threshold
-    let min_cluster_size: usize = if h_c * w_c > 500_000 { 34 } // Fibonacci !
-                                  else if h_c * w_c > 100_000 { 21 } // Fibonacci !
-                                  else { 13 }; // Fibonacci !
+    let min_cluster_size: usize = if h_c * w_c > 500_000 {
+        34
+    }
+    // Fibonacci !
+    else if h_c * w_c > 100_000 {
+        21
+    }
+    // Fibonacci !
+    else {
+        13
+    }; // Fibonacci !
     let mut primitives: Vec<Primitive> = Vec::new();
 
     for cluster in &clusters {
-        if cluster.len() < min_cluster_size { continue; }
+        if cluster.len() < min_cluster_size {
+            continue;
+        }
 
         // Fit superstring segment (Fibonacci amplitude + phi phase)
         let seg_result = fit_segment(cluster).and_then(|(x1, y1, x2, y2, amp, phase)| {
             let a = snap_to_fibonacci(amp);
-            if a == 0 { return None; }
-            let ph = (phase * 128.0 / std::f64::consts::PI).round().clamp(-128.0, 127.0) as i8;
-            let prim = Primitive::Segment { x1, y1, x2, y2, amplitude: a, phase: ph };
+            if a == 0 {
+                return None;
+            }
+            let ph = (phase * 128.0 / std::f64::consts::PI)
+                .round()
+                .clamp(-128.0, 127.0) as i8;
+            let prim = Primitive::Segment {
+                x1,
+                y1,
+                x2,
+                y2,
+                amplitude: a,
+                phase: ph,
+            };
             let profit = compute_profit_fast(&prim, cluster);
-            if profit > 0.0 { Some((prim, profit)) } else { None }
+            if profit > 0.0 {
+                Some((prim, profit))
+            } else {
+                None
+            }
         });
 
         // Fit arc (>= 5 points needed)
@@ -669,11 +809,27 @@ pub fn extract_primitives(
                 let amp_val = (ss * ss + sc * sc).sqrt() * 2.0 / n as f64;
                 let phase_val = sc.atan2(ss);
                 let a = snap_to_fibonacci(amp_val);
-                if a == 0 { return None; }
-                let ph = (phase_val * 128.0 / std::f64::consts::PI).round().clamp(-128.0, 127.0) as i8;
-                let prim = Primitive::Arc { cx, cy, radius, theta_start: ts, theta_end: te, amplitude: a, phase: ph };
+                if a == 0 {
+                    return None;
+                }
+                let ph = (phase_val * 128.0 / std::f64::consts::PI)
+                    .round()
+                    .clamp(-128.0, 127.0) as i8;
+                let prim = Primitive::Arc {
+                    cx,
+                    cy,
+                    radius,
+                    theta_start: ts,
+                    theta_end: te,
+                    amplitude: a,
+                    phase: ph,
+                };
                 let profit = compute_profit_fast(&prim, cluster);
-                if profit > 0.0 { Some((prim, profit)) } else { None }
+                if profit > 0.0 {
+                    Some((prim, profit))
+                } else {
+                    None
+                }
             })
         } else {
             None
@@ -682,7 +838,11 @@ pub fn extract_primitives(
         // Choose the best between segment and arc
         let best = match (seg_result, arc_result) {
             (Some((sp, sprof)), Some((ap, aprof))) => {
-                if sprof >= aprof { Some(sp) } else { Some(ap) }
+                if sprof >= aprof {
+                    Some(sp)
+                } else {
+                    Some(ap)
+                }
             }
             (Some((sp, _)), None) => Some(sp),
             (None, Some((ap, _))) => Some(ap),
@@ -696,12 +856,23 @@ pub fn extract_primitives(
 
     // 5. Subtract ALL predictions in a single pass
     if !primitives.is_empty() {
-        let (pred_lh, pred_hl, pred_hh) = render_primitives(
-            &primitives, h_lh, w_lh, h_hl, w_hl, h_hh, w_hh,
-        );
-        for r in 0..h_lh { for c in 0..w_lh { r_lh[[r, c]] -= pred_lh[[r, c]]; } }
-        for r in 0..h_hl { for c in 0..w_hl { r_hl[[r, c]] -= pred_hl[[r, c]]; } }
-        for r in 0..h_hh { for c in 0..w_hh { r_hh[[r, c]] -= pred_hh[[r, c]]; } }
+        let (pred_lh, pred_hl, pred_hh) =
+            render_primitives(&primitives, h_lh, w_lh, h_hl, w_hl, h_hh, w_hh);
+        for r in 0..h_lh {
+            for c in 0..w_lh {
+                r_lh[[r, c]] -= pred_lh[[r, c]];
+            }
+        }
+        for r in 0..h_hl {
+            for c in 0..w_hl {
+                r_hl[[r, c]] -= pred_hl[[r, c]];
+            }
+        }
+        for r in 0..h_hh {
+            for c in 0..w_hh {
+                r_hh[[r, c]] -= pred_hh[[r, c]];
+            }
+        }
     }
 
     (primitives, r_lh, r_hl, r_hh)
@@ -728,8 +899,7 @@ pub fn encode_detail_subband(
 
     for _pass in 0..max_passes {
         // Extract primitives from current residual
-        let (prims, new_lh, new_hl, new_hh) =
-            extract_primitives(&resid_lh, &resid_hl, &resid_hh);
+        let (prims, new_lh, new_hl, new_hh) = extract_primitives(&resid_lh, &resid_hl, &resid_hh);
 
         if prims.is_empty() {
             break;
@@ -783,12 +953,10 @@ fn angle_diff(a: f64, b: f64) -> f64 {
 fn primitive_to_dc(prim: &Primitive, block_size: usize) -> ((f64, f64), (f64, f64)) {
     let scale = (block_size as f64) / 2.0;
     match prim {
-        Primitive::Segment { x1, y1, x2, y2, .. } => {
-            (
-                (*y1 as f64 / scale, *x1 as f64 / scale),
-                (*y2 as f64 / scale, *x2 as f64 / scale),
-            )
-        }
+        Primitive::Segment { x1, y1, x2, y2, .. } => (
+            (*y1 as f64 / scale, *x1 as f64 / scale),
+            (*y2 as f64 / scale, *x2 as f64 / scale),
+        ),
         Primitive::Arc { cx, cy, radius, .. } => {
             let r = *radius as f64;
             let cx_f = *cx as f64;
@@ -873,8 +1041,12 @@ pub fn match_primitives(
                     let dx = px as f64 - ep2.1;
                     (dy * dy + dx * dx).sqrt()
                 };
-                if d1 < h_ep1 { h_ep1 = d1; }
-                if d2 < h_ep2 { h_ep2 = d2; }
+                if d1 < h_ep1 {
+                    h_ep1 = d1;
+                }
+                if d2 < h_ep2 {
+                    h_ep2 = d2;
+                }
             }
             let hausdorff = h_ep1.max(h_ep2);
 
@@ -903,8 +1075,12 @@ pub fn match_primitives(
             let da = angle_diff(prim_angle, best_orientation);
             let d_amp = prim_amp - best_magnitude;
 
-            let dp_y_fp = (dp_y * 16.0).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
-            let dp_x_fp = (dp_x * 16.0).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+            let dp_y_fp = (dp_y * 16.0)
+                .round()
+                .clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+            let dp_x_fp = (dp_x * 16.0)
+                .round()
+                .clamp(i16::MIN as f64, i16::MAX as f64) as i16;
             let da_q = (da * 32.0 / std::f64::consts::PI)
                 .round()
                 .clamp(-128.0, 127.0) as i8;
@@ -964,7 +1140,14 @@ pub fn serialize_primitives(primitives: &[Primitive]) -> Vec<u8> {
 
     for prim in primitives {
         match prim {
-            Primitive::Segment { x1, y1, x2, y2, amplitude, phase } => {
+            Primitive::Segment {
+                x1,
+                y1,
+                x2,
+                y2,
+                amplitude,
+                phase,
+            } => {
                 body.push(0x00);
                 body.extend_from_slice(&x1.to_le_bytes());
                 body.extend_from_slice(&y1.to_le_bytes());
@@ -973,7 +1156,15 @@ pub fn serialize_primitives(primitives: &[Primitive]) -> Vec<u8> {
                 body.push(*amplitude as u8);
                 body.push(*phase as u8);
             }
-            Primitive::Arc { cx, cy, radius, theta_start, theta_end, amplitude, phase } => {
+            Primitive::Arc {
+                cx,
+                cy,
+                radius,
+                theta_start,
+                theta_end,
+                amplitude,
+                phase,
+            } => {
                 body.push(0x01);
                 body.extend_from_slice(&cx.to_le_bytes());
                 body.extend_from_slice(&cy.to_le_bytes());
@@ -997,43 +1188,82 @@ pub fn serialize_primitives(primitives: &[Primitive]) -> Vec<u8> {
 /// Deserialize a list of primitives from a byte slice.
 /// Returns (primitives, total_bytes_consumed).
 pub fn deserialize_primitives(data: &[u8]) -> (Vec<Primitive>, usize) {
-    if data.len() < 6 { return (Vec::new(), 0); }
+    if data.len() < 6 {
+        return (Vec::new(), 0);
+    }
 
     let section_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
     let total_bytes = 4 + section_size;
 
-    if data.len() < total_bytes { return (Vec::new(), 0); }
+    if data.len() < total_bytes {
+        return (Vec::new(), 0);
+    }
 
     let n_prims = u16::from_le_bytes([data[4], data[5]]) as usize;
     let mut p = 6usize;
     let mut primitives = Vec::with_capacity(n_prims);
 
     for _ in 0..n_prims {
-        if p >= total_bytes { break; }
-        let ptype = data[p]; p += 1;
+        if p >= total_bytes {
+            break;
+        }
+        let ptype = data[p];
+        p += 1;
         match ptype {
             0x00 => {
                 // Superstring segment: 4*i16 + amplitude(i8) + phase(i8) = 10 bytes
-                if p + 10 > total_bytes { break; }
-                let x1 = i16::from_le_bytes([data[p], data[p + 1]]); p += 2;
-                let y1 = i16::from_le_bytes([data[p], data[p + 1]]); p += 2;
-                let x2 = i16::from_le_bytes([data[p], data[p + 1]]); p += 2;
-                let y2 = i16::from_le_bytes([data[p], data[p + 1]]); p += 2;
-                let amplitude = data[p] as i8; p += 1;
-                let phase = data[p] as i8; p += 1;
-                primitives.push(Primitive::Segment { x1, y1, x2, y2, amplitude, phase });
+                if p + 10 > total_bytes {
+                    break;
+                }
+                let x1 = i16::from_le_bytes([data[p], data[p + 1]]);
+                p += 2;
+                let y1 = i16::from_le_bytes([data[p], data[p + 1]]);
+                p += 2;
+                let x2 = i16::from_le_bytes([data[p], data[p + 1]]);
+                p += 2;
+                let y2 = i16::from_le_bytes([data[p], data[p + 1]]);
+                p += 2;
+                let amplitude = data[p] as i8;
+                p += 1;
+                let phase = data[p] as i8;
+                p += 1;
+                primitives.push(Primitive::Segment {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    amplitude,
+                    phase,
+                });
             }
             0x01 => {
                 // Superstring arc: 2*i16 + u16 + 2*i8 + amplitude(i8) + phase(i8) = 12 bytes
-                if p + 12 > total_bytes { break; }
-                let cx = i16::from_le_bytes([data[p], data[p + 1]]); p += 2;
-                let cy = i16::from_le_bytes([data[p], data[p + 1]]); p += 2;
-                let radius = u16::from_le_bytes([data[p], data[p + 1]]); p += 2;
-                let theta_start = data[p] as i8; p += 1;
-                let theta_end   = data[p] as i8; p += 1;
-                let amplitude = data[p] as i8; p += 1;
-                let phase = data[p] as i8; p += 1;
-                primitives.push(Primitive::Arc { cx, cy, radius, theta_start, theta_end, amplitude, phase });
+                if p + 12 > total_bytes {
+                    break;
+                }
+                let cx = i16::from_le_bytes([data[p], data[p + 1]]);
+                p += 2;
+                let cy = i16::from_le_bytes([data[p], data[p + 1]]);
+                p += 2;
+                let radius = u16::from_le_bytes([data[p], data[p + 1]]);
+                p += 2;
+                let theta_start = data[p] as i8;
+                p += 1;
+                let theta_end = data[p] as i8;
+                p += 1;
+                let amplitude = data[p] as i8;
+                p += 1;
+                let phase = data[p] as i8;
+                p += 1;
+                primitives.push(Primitive::Arc {
+                    cx,
+                    cy,
+                    radius,
+                    theta_start,
+                    theta_end,
+                    amplitude,
+                    phase,
+                });
             }
             _ => break, // unknown type
         }
@@ -1290,11 +1520,7 @@ pub fn fit_ll_patches(
         }
     }
 
-    let residual: Vec<f64> = ll
-        .iter()
-        .zip(&prediction)
-        .map(|(&a, &b)| a - b)
-        .collect();
+    let residual: Vec<f64> = ll.iter().zip(&prediction).map(|(&a, &b)| a - b).collect();
     (patches, residual)
 }
 
@@ -1351,7 +1577,13 @@ pub fn deserialize_poly_patches(data: &[u8]) -> (Vec<PolyPatch>, usize) {
             *c = h16.to_f64();
             pos += 2;
         }
-        patches.push(PolyPatch { x0, y0, w, h, coeffs });
+        patches.push(PolyPatch {
+            x0,
+            y0,
+            w,
+            h,
+            coeffs,
+        });
     }
     (patches, pos)
 }
@@ -1375,7 +1607,14 @@ mod tests {
     /// cos(0)=1, sin(0)=0 => LH>0, HL=0, HH=0
     #[test]
     fn test_segment_horizontal_emits_lh_only() {
-        let prim = Primitive::Segment { x1: 2, y1: 5, x2: 10, y2: 5, amplitude: 10, phase: 0 };
+        let prim = Primitive::Segment {
+            x1: 2,
+            y1: 5,
+            x2: 10,
+            y2: 5,
+            amplitude: 10,
+            phase: 0,
+        };
         let (lh, hl, hh) = render_primitives(&[prim], 20, 20, 20, 20, 20, 20);
 
         let lh_sum: f64 = lh.iter().copied().sum();
@@ -1383,15 +1622,30 @@ mod tests {
         let hh_sum: f64 = hh.iter().copied().sum();
 
         assert!(lh_sum > EPS, "LH must be non-zero for horizontal segment");
-        assert!(hl_sum.abs() < EPS, "HL must be zero for horizontal segment, got {}", hl_sum);
-        assert!(hh_sum.abs() < EPS, "HH must be zero for horizontal segment, got {}", hh_sum);
+        assert!(
+            hl_sum.abs() < EPS,
+            "HL must be zero for horizontal segment, got {}",
+            hl_sum
+        );
+        assert!(
+            hh_sum.abs() < EPS,
+            "HH must be zero for horizontal segment, got {}",
+            hh_sum
+        );
     }
 
     /// A vertical segment (theta=pi/2) should emit only into HL.
     /// cos(pi/2)=0, sin(pi/2)=1 => LH=0, HL>0, HH=0
     #[test]
     fn test_segment_vertical_emits_hl_only() {
-        let prim = Primitive::Segment { x1: 5, y1: 2, x2: 5, y2: 10, amplitude: 10, phase: 0 };
+        let prim = Primitive::Segment {
+            x1: 5,
+            y1: 2,
+            x2: 5,
+            y2: 10,
+            amplitude: 10,
+            phase: 0,
+        };
         let (lh, hl, hh) = render_primitives(&[prim], 20, 20, 20, 20, 20, 20);
 
         let lh_sum: f64 = lh.iter().copied().sum();
@@ -1399,15 +1653,32 @@ mod tests {
         let hh_sum: f64 = hh.iter().copied().sum();
 
         // HL must dominate for a vertical segment; LH/HH can have small cross-talk
-        assert!(hl_sum > lh_sum.abs() * 2.0, "HL must dominate for vertical segment (HL={}, LH={})", hl_sum, lh_sum);
-        assert!(hl_sum > hh_sum.abs() * 2.0, "HL must dominate for vertical segment (HL={}, HH={})", hl_sum, hh_sum);
+        assert!(
+            hl_sum > lh_sum.abs() * 2.0,
+            "HL must dominate for vertical segment (HL={}, LH={})",
+            hl_sum,
+            lh_sum
+        );
+        assert!(
+            hl_sum > hh_sum.abs() * 2.0,
+            "HL must dominate for vertical segment (HL={}, HH={})",
+            hl_sum,
+            hh_sum
+        );
     }
 
     /// A 45-degree diagonal segment should emit into all three bands.
     /// theta=pi/4 : cos=sin=1/sqrt(2), HH = |sin*cos| = 0.5
     #[test]
     fn test_segment_diagonal_emits_all_bands() {
-        let prim = Primitive::Segment { x1: 2, y1: 2, x2: 10, y2: 10, amplitude: 10, phase: 0 };
+        let prim = Primitive::Segment {
+            x1: 2,
+            y1: 2,
+            x2: 10,
+            y2: 10,
+            amplitude: 10,
+            phase: 0,
+        };
         let (lh, hl, hh) = render_primitives(&[prim], 20, 20, 20, 20, 20, 20);
 
         let lh_sum: f64 = lh.iter().copied().sum();
@@ -1466,7 +1737,10 @@ mod tests {
     fn test_fit_segment_horizontal() {
         let points: Vec<(usize, usize, f64)> = (0..10).map(|c| (5usize, c, 5.0)).collect();
         let result = fit_segment(&points);
-        assert!(result.is_some(), "fit_segment must succeed on 10 horizontal points");
+        assert!(
+            result.is_some(),
+            "fit_segment must succeed on 10 horizontal points"
+        );
         let (x1, y1, x2, y2, amp, _phase) = result.unwrap();
         // Both endpoints must be on the same row (row=5)
         assert_eq!(y1, y2, "y1 and y2 must be equal for a horizontal segment");
@@ -1485,7 +1759,7 @@ mod tests {
         // Semicircle centered at (50, 50), radius 20
         let cx_true = 50.0f64;
         let cy_true = 50.0f64;
-        let r_true  = 20.0f64;
+        let r_true = 20.0f64;
         let points: Vec<(usize, usize, f64)> = (0..=10)
             .map(|i| {
                 let t = i as f64 * std::f64::consts::PI / 10.0;
@@ -1498,9 +1772,24 @@ mod tests {
         let result = fit_arc(&points);
         assert!(result.is_some(), "fit_arc must succeed on a semicircle");
         let (cx, cy, radius, _ts, _te, _force) = result.unwrap();
-        assert!((cx as f64 - cx_true).abs() < 5.0, "Approximate center X: {} vs {}", cx, cx_true);
-        assert!((cy as f64 - cy_true).abs() < 5.0, "Approximate center Y: {} vs {}", cy, cy_true);
-        assert!((radius as f64 - r_true).abs() < 5.0, "Approximate radius: {} vs {}", radius, r_true);
+        assert!(
+            (cx as f64 - cx_true).abs() < 5.0,
+            "Approximate center X: {} vs {}",
+            cx,
+            cx_true
+        );
+        assert!(
+            (cy as f64 - cy_true).abs() < 5.0,
+            "Approximate center Y: {} vs {}",
+            cy,
+            cy_true
+        );
+        assert!(
+            (radius as f64 - r_true).abs() < 5.0,
+            "Approximate radius: {} vs {}",
+            radius,
+            r_true
+        );
     }
 
     // ----------------------------------------------------------
@@ -1511,9 +1800,31 @@ mod tests {
     #[test]
     fn test_serialize_roundtrip() {
         let primitives = vec![
-            Primitive::Segment { x1: 10, y1: 20, x2: 30, y2: 40, amplitude: 5, phase: 0 },
-            Primitive::Arc { cx: 100, cy: 200, radius: 50, theta_start: -64, theta_end: 64, amplitude: -3, phase: 1 },
-            Primitive::Segment { x1: -10, y1: -5, x2: 15, y2: 25, amplitude: 127, phase: -1 },
+            Primitive::Segment {
+                x1: 10,
+                y1: 20,
+                x2: 30,
+                y2: 40,
+                amplitude: 5,
+                phase: 0,
+            },
+            Primitive::Arc {
+                cx: 100,
+                cy: 200,
+                radius: 50,
+                theta_start: -64,
+                theta_end: 64,
+                amplitude: -3,
+                phase: 1,
+            },
+            Primitive::Segment {
+                x1: -10,
+                y1: -5,
+                x2: 15,
+                y2: 25,
+                amplitude: 127,
+                phase: -1,
+            },
         ];
 
         let bytes = serialize_primitives(&primitives);
@@ -1523,20 +1834,62 @@ mod tests {
         assert_eq!(decoded.len(), primitives.len(), "Same number of primitives");
 
         match (&decoded[0], &primitives[0]) {
-            (Primitive::Segment { x1: a1, y1: b1, x2: c1, y2: d1, amplitude: f1, phase: p1 },
-             Primitive::Segment { x1: a2, y1: b2, x2: c2, y2: d2, amplitude: f2, phase: p2 }) => {
-                assert_eq!(a1, a2); assert_eq!(b1, b2);
-                assert_eq!(c1, c2); assert_eq!(d1, d2);
-                assert_eq!(f1, f2); assert_eq!(p1, p2);
+            (
+                Primitive::Segment {
+                    x1: a1,
+                    y1: b1,
+                    x2: c1,
+                    y2: d1,
+                    amplitude: f1,
+                    phase: p1,
+                },
+                Primitive::Segment {
+                    x1: a2,
+                    y1: b2,
+                    x2: c2,
+                    y2: d2,
+                    amplitude: f2,
+                    phase: p2,
+                },
+            ) => {
+                assert_eq!(a1, a2);
+                assert_eq!(b1, b2);
+                assert_eq!(c1, c2);
+                assert_eq!(d1, d2);
+                assert_eq!(f1, f2);
+                assert_eq!(p1, p2);
             }
             _ => panic!("Incorrect type for primitive[0]"),
         }
 
         match (&decoded[1], &primitives[1]) {
-            (Primitive::Arc { cx: a1, cy: b1, radius: r1, theta_start: ts1, theta_end: te1, amplitude: f1, phase: p1 },
-             Primitive::Arc { cx: a2, cy: b2, radius: r2, theta_start: ts2, theta_end: te2, amplitude: f2, phase: p2 }) => {
-                assert_eq!(a1, a2); assert_eq!(b1, b2); assert_eq!(r1, r2);
-                assert_eq!(ts1, ts2); assert_eq!(te1, te2); assert_eq!(f1, f2); assert_eq!(p1, p2);
+            (
+                Primitive::Arc {
+                    cx: a1,
+                    cy: b1,
+                    radius: r1,
+                    theta_start: ts1,
+                    theta_end: te1,
+                    amplitude: f1,
+                    phase: p1,
+                },
+                Primitive::Arc {
+                    cx: a2,
+                    cy: b2,
+                    radius: r2,
+                    theta_start: ts2,
+                    theta_end: te2,
+                    amplitude: f2,
+                    phase: p2,
+                },
+            ) => {
+                assert_eq!(a1, a2);
+                assert_eq!(b1, b2);
+                assert_eq!(r1, r2);
+                assert_eq!(ts1, ts2);
+                assert_eq!(te1, te2);
+                assert_eq!(f1, f2);
+                assert_eq!(p1, p2);
             }
             _ => panic!("Incorrect type for primitive[1]"),
         }
@@ -1549,7 +1902,8 @@ mod tests {
     /// A clear horizontal line in LH should produce at least one primitive.
     #[test]
     fn test_extract_horizontal_line() {
-        let h = 32usize; let w = 32usize;
+        let h = 32usize;
+        let w = 32usize;
         let mut q_lh = Array2::<f64>::zeros((h, w));
         let q_hl = Array2::<f64>::zeros((h, w));
         let q_hh = Array2::<f64>::zeros((h, w));
@@ -1560,7 +1914,10 @@ mod tests {
         }
 
         let (prims, _r_lh, _r_hl, _r_hh) = extract_primitives(&q_lh, &q_hl, &q_hh);
-        assert!(!prims.is_empty(), "Must find at least one primitive for a clear horizontal line");
+        assert!(
+            !prims.is_empty(),
+            "Must find at least one primitive for a clear horizontal line"
+        );
     }
 
     /// Empty bands should produce no primitives.
@@ -1709,8 +2066,7 @@ mod tests {
         let total_energy: f64 =
             lh.iter().map(|v| v * v).sum::<f64>() + hl.iter().map(|v| v * v).sum::<f64>();
 
-        let (prims, res_lh, res_hl, _res_hh) =
-            super::encode_detail_subband(&lh, &hl, &hh, 3, 75);
+        let (prims, res_lh, res_hl, _res_hh) = super::encode_detail_subband(&lh, &hl, &hh, 3, 75);
 
         let resid_energy: f64 =
             res_lh.iter().map(|v| v * v).sum::<f64>() + res_hl.iter().map(|v| v * v).sum::<f64>();
@@ -1738,8 +2094,12 @@ mod tests {
     #[test]
     fn test_match_no_contours() {
         let prim = Primitive::Segment {
-            x1: 0, y1: 0, x2: 100, y2: 0,
-            amplitude: 5, phase: 0,
+            x1: 0,
+            y1: 0,
+            x2: 100,
+            y2: 0,
+            amplitude: 5,
+            phase: 0,
         };
         let matches = super::match_primitives(&[prim], &[], 8);
         assert_eq!(matches.len(), 1);
@@ -1757,8 +2117,12 @@ mod tests {
         };
         // Primitive far away → should be Surprise
         let far_prim = Primitive::Segment {
-            x1: 0, y1: 0, x2: 10, y2: 0,
-            amplitude: 5, phase: 0,
+            x1: 0,
+            y1: 0,
+            x2: 10,
+            y2: 0,
+            amplitude: 5,
+            phase: 0,
         };
         let matches = super::match_primitives(&[far_prim], &[contour], 16);
         assert_eq!(matches.len(), 1);
@@ -1783,8 +2147,12 @@ mod tests {
     #[test]
     fn test_primitive_to_dc_segment() {
         let prim = Primitive::Segment {
-            x1: 16, y1: 8, x2: 32, y2: 16,
-            amplitude: 5, phase: 0,
+            x1: 16,
+            y1: 8,
+            x2: 32,
+            y2: 16,
+            amplitude: 5,
+            phase: 0,
         };
         // block_size=8, scale=4
         let (ep1, ep2) = super::primitive_to_dc(&prim, 8);
@@ -1799,9 +2167,13 @@ mod tests {
     #[test]
     fn test_primitive_to_dc_arc() {
         let prim = Primitive::Arc {
-            cx: 40, cy: 20, radius: 10,
-            theta_start: 0, theta_end: 64,
-            amplitude: 5, phase: 0,
+            cx: 40,
+            cy: 20,
+            radius: 10,
+            theta_start: 0,
+            theta_end: 64,
+            amplitude: 5,
+            phase: 0,
         };
         // block_size=8, scale=4
         let (ep1, ep2) = super::primitive_to_dc(&prim, 8);

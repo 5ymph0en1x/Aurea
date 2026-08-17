@@ -66,10 +66,14 @@ pub fn sobel_magnitude(grid: &[f64], h: usize, w: usize) -> Vec<f64> {
 
             if interior_r && interior_c {
                 gx = (get(r - 1, c + 1) + 2.0 * get(r, c + 1) + get(r + 1, c + 1)
-                    - get(r - 1, c - 1) - 2.0 * get(r, c - 1) - get(r + 1, c - 1))
+                    - get(r - 1, c - 1)
+                    - 2.0 * get(r, c - 1)
+                    - get(r + 1, c - 1))
                     / 4.0;
                 gy = (get(r + 1, c - 1) + 2.0 * get(r + 1, c) + get(r + 1, c + 1)
-                    - get(r - 1, c - 1) - 2.0 * get(r - 1, c) - get(r - 1, c + 1))
+                    - get(r - 1, c - 1)
+                    - 2.0 * get(r - 1, c)
+                    - get(r - 1, c + 1))
                     / 4.0;
             } else {
                 let r_next = if r + 1 < h { r + 1 } else { r };
@@ -103,10 +107,14 @@ pub fn sobel_direction(grid: &[f64], h: usize, w: usize) -> Vec<f64> {
 
             if interior_r && interior_c {
                 gx = (get(r - 1, c + 1) + 2.0 * get(r, c + 1) + get(r + 1, c + 1)
-                    - get(r - 1, c - 1) - 2.0 * get(r, c - 1) - get(r + 1, c - 1))
+                    - get(r - 1, c - 1)
+                    - 2.0 * get(r, c - 1)
+                    - get(r + 1, c - 1))
                     / 4.0;
                 gy = (get(r + 1, c - 1) + 2.0 * get(r + 1, c) + get(r + 1, c + 1)
-                    - get(r - 1, c - 1) - 2.0 * get(r - 1, c) - get(r - 1, c + 1))
+                    - get(r - 1, c - 1)
+                    - 2.0 * get(r - 1, c)
+                    - get(r - 1, c + 1))
                     / 4.0;
             } else {
                 let r_next = if r + 1 < h { r + 1 } else { r };
@@ -132,7 +140,11 @@ pub fn sobel_direction(grid: &[f64], h: usize, w: usize) -> Vec<f64> {
 /// The kernel is truncated at radius = ceil(3σ). If sigma < 0.01, the input
 /// is returned unchanged (identity pass).
 pub fn gaussian_blur_separable(input: &[f64], h: usize, w: usize, sigma: f64) -> Vec<f64> {
-    assert_eq!(input.len(), h * w, "gaussian_blur_separable: input size mismatch");
+    assert_eq!(
+        input.len(),
+        h * w,
+        "gaussian_blur_separable: input size mismatch"
+    );
 
     if sigma < 0.01 {
         return input.to_vec();
@@ -158,8 +170,8 @@ pub fn gaussian_blur_separable(input: &[f64], h: usize, w: usize, sigma: f64) ->
         for c in 0..w {
             let mut acc = 0.0f64;
             for (ki, &kv) in kernel.iter().enumerate() {
-                let src_c = (c as isize + ki as isize - radius as isize)
-                    .clamp(0, w as isize - 1) as usize;
+                let src_c =
+                    (c as isize + ki as isize - radius as isize).clamp(0, w as isize - 1) as usize;
                 acc += input[r * w + src_c] * kv;
             }
             row_out[c] = acc;
@@ -172,8 +184,8 @@ pub fn gaussian_blur_separable(input: &[f64], h: usize, w: usize, sigma: f64) ->
         for c in 0..w {
             let mut acc = 0.0f64;
             for (ki, &kv) in kernel.iter().enumerate() {
-                let src_r = (r as isize + ki as isize - radius as isize)
-                    .clamp(0, h as isize - 1) as usize;
+                let src_r =
+                    (r as isize + ki as isize - radius as isize).clamp(0, h as isize - 1) as usize;
                 acc += tmp[src_r * w + c] * kv;
             }
             row_out[c] = acc;
@@ -188,14 +200,32 @@ pub fn gaussian_blur_separable(input: &[f64], h: usize, w: usize, sigma: f64) ->
 
 /// Normalize a slice to [0, 1].
 ///
-/// If all values are equal (flat input), returns all zeros to avoid NaN.
+/// A flat input returns all zeros rather than dividing by zero — but the guard
+/// has to be **relative to the data scale**, not absolute.
+///
+/// The DoG this normalizes is computed from a DC grid whose values reach
+/// ~4·10⁴ (the adaptive LOT stores DC as `mean · 16²`). Sobel and the two
+/// Gaussian passes therefore leave rounding residue of order `4·10⁴ · 2⁻⁵² ≈
+/// 10⁻¹¹`, four orders of magnitude above `f64::EPSILON`. With an absolute
+/// guard a perfectly flat image slips past it and pure floating-point noise
+/// gets stretched to the full `[0, 1]` range.
+///
+/// That is not merely ugly: the Turing field is a *zero-bit* field, required to
+/// be reconstructed identically by both sides. The encoder starts from an f64
+/// DC grid and the decoder from the same grid rounded through the f32 header,
+/// so each amplifies a *different* noise pattern. The entropy contexts then
+/// disagree and the stream cannot be decoded at all.
 pub fn normalize_01(input: &[f64]) -> Vec<f64> {
     let min = input.iter().cloned().fold(f64::INFINITY, f64::min);
     let max = input.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    if (max - min).abs() < f64::EPSILON {
+    let range = max - min;
+    // Anything within ~2^-40 of the data's own magnitude is rounding residue,
+    // not signal. Real DoG fields sit many orders of magnitude above this, so
+    // the guard never fires on actual image content.
+    let scale = min.abs().max(max.abs()).max(1.0);
+    if !(range > scale * 1e-12) {
         return vec![0.0; input.len()];
     }
-    let range = max - min;
     input.iter().map(|&v| (v - min) / range).collect()
 }
 
@@ -248,10 +278,7 @@ pub fn compute_turing_field(
     let t_norm = normalize_01(&dog);
 
     // Step 6: Step modulation = φ^(−k × T_norm)
-    let step_modulation: Vec<f64> = t_norm
-        .iter()
-        .map(|&t| PHI.powf(-k_step * t))
-        .collect();
+    let step_modulation: Vec<f64> = t_norm.iter().map(|&t| PHI.powf(-k_step * t)).collect();
 
     // Step 7: Inhibitor gradient (magnitude + direction)
     let inhibitor_gradient = sobel_magnitude(&inhibitor, grid_h, grid_w);
@@ -477,8 +504,16 @@ pub fn trace_ridges(
         // Orientations: finite differences along path
         let mut orientations = vec![0.0f64; n];
         for i in 0..n {
-            let (y0, x0) = if i > 0 { positions[i - 1] } else { positions[0] };
-            let (y1, x1) = if i + 1 < n { positions[i + 1] } else { positions[n - 1] };
+            let (y0, x0) = if i > 0 {
+                positions[i - 1]
+            } else {
+                positions[0]
+            };
+            let (y1, x1) = if i + 1 < n {
+                positions[i + 1]
+            } else {
+                positions[n - 1]
+            };
             let dy = y1 as f64 - y0 as f64;
             let dx = x1 as f64 - x0 as f64;
             orientations[i] = dy.atan2(dx);
@@ -701,15 +736,18 @@ mod tests {
 
         // T_norm must be in [0, 1]
         for &t in &tf.field {
-            assert!((0.0..=1.0 + 1e-10).contains(&t), "T_norm out of range: {}", t);
+            assert!(
+                (0.0..=1.0 + 1e-10).contains(&t),
+                "T_norm out of range: {}",
+                t
+            );
         }
 
         // The edge region (rows 3–4) should have higher average T than the
         // uniform interior (row 0 or row 7)
         let edge_t_avg: f64 = (0..w).map(|c| tf.field[4 * w + c]).sum::<f64>() / w as f64;
         let top_t_avg: f64 = (0..w).map(|c| tf.field[0 * w + c]).sum::<f64>() / w as f64;
-        let bot_t_avg: f64 =
-            (0..w).map(|c| tf.field[(h - 1) * w + c]).sum::<f64>() / w as f64;
+        let bot_t_avg: f64 = (0..w).map(|c| tf.field[(h - 1) * w + c]).sum::<f64>() / w as f64;
 
         assert!(
             edge_t_avg >= top_t_avg,
@@ -739,9 +777,15 @@ mod tests {
         }
         let tf = compute_turing_field(&dc, 12, 12, 1.5, 2.618, 0.5);
         let ridges = trace_ridges(&tf.field, 12, 12, Some(&tf.inhibitor_gradient));
-        assert!(!ridges.is_empty(), "should detect a ridge at the horizontal edge");
+        assert!(
+            !ridges.is_empty(),
+            "should detect a ridge at the horizontal edge"
+        );
         let r = &ridges[0];
-        assert!(r.positions.len() >= 3, "ridge should span at least 3 grid cells");
+        assert!(
+            r.positions.len() >= 3,
+            "ridge should span at least 3 grid cells"
+        );
     }
 
     // -------------------------------------------------------------------------

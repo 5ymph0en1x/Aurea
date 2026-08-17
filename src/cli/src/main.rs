@@ -1,12 +1,15 @@
+use aurea_core::aurea_encoder;
+use aurea_core::codec_params::{CodecParams, Pipeline};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
-use aurea_core::aurea_encoder;
-use aurea_core::codec_params::{CodecParams, Pipeline};
 
 #[derive(Parser)]
-#[command(name = "aurea", about = "AUREA codec (.aur) — Fibonacci/phi/Zeckendorf image codec")]
+#[command(
+    name = "aurea",
+    about = "AUREA codec (.aur) — Fibonacci/phi/Zeckendorf image codec"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -20,6 +23,9 @@ enum Commands {
         input: PathBuf,
         /// Output image
         output: PathBuf,
+        /// Keep only the first N progressive AC layers (0 = DC base)
+        #[arg(long)]
+        layers: Option<usize>,
     },
     /// Encode an image to a .aur file
     Encode {
@@ -33,6 +39,10 @@ enum Commands {
         /// Pipeline: lot, edge-energy, optica, hex, dna (default: lot)
         #[arg(long, default_value = "lot")]
         pipeline: String,
+        /// Transform topology: adaptive-critical (default, v27), fixed16-critical,
+        /// fixed16-lapped50, adaptive16x32-lapped50
+        #[arg(long, default_value = "adaptive-critical")]
+        lot_topology: String,
     },
     /// Display information about a .aur file
     Info {
@@ -48,27 +58,39 @@ fn parse_pipeline(s: &str) -> Result<Pipeline, String> {
         "lot" => Ok(Pipeline::LotAdn4),
         "hex" => Ok(Pipeline::HexPyramid),
         "dna" => Ok(Pipeline::EdgeEnergyDna),
-        _ => Err(format!("Unknown pipeline '{}'. Choose: edge-energy, optica, lot, hex, dna", s)),
+        _ => Err(format!(
+            "Unknown pipeline '{}'. Choose: edge-energy, optica, lot, hex, dna",
+            s
+        )),
     }
 }
 
-fn cmd_decode(input: &PathBuf, output: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_decode(
+    input: &PathBuf,
+    output: &PathBuf,
+    layers: Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let t0 = Instant::now();
     let file_data = fs::read(input)?;
-    let decoded = aurea_core::decode_aurea(&file_data)?;
+    let decoded = aurea_core::decode_aurea_with_progressive_layers(&file_data, layers)?;
     let elapsed = t0.elapsed();
 
-    let img = image::RgbImage::from_raw(
-        decoded.width as u32,
-        decoded.height as u32,
-        decoded.rgb,
-    )
-    .ok_or("Unable to create image buffer")?;
+    let img = image::RgbImage::from_raw(decoded.width as u32, decoded.height as u32, decoded.rgb)
+        .ok_or("Unable to create image buffer")?;
 
     img.save(output)?;
 
     println!("Decode: {} -> {}", input.display(), output.display());
     println!("  Dimensions : {}x{}", decoded.width, decoded.height);
+    if let Some(layer_count) = layers {
+        println!("  AC layers  : {layer_count}");
+    }
+    if let Some(info) = &decoded.progressive {
+        println!(
+            "  Progressive: {}/{} layers, {} prefix bytes",
+            info.decoded_layers, info.total_layers, info.prefix_bytes
+        );
+    }
     println!("  Time       : {:.0} ms", elapsed.as_secs_f64() * 1000.0);
 
     Ok(())
@@ -100,10 +122,15 @@ fn cmd_info(input: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             println!("Format    : AUREA v1 (.aur) [AUR2]");
         }
         println!("Size      : {} bytes ({:.2} bpp)", file_size, bpp);
-        println!("Image     : {}x{} ({} pixels)", header.width, header.height, n);
+        println!(
+            "Image     : {}x{} ({} pixels)",
+            header.width, header.height, n
+        );
         println!("Quality   : {}", header.quality);
         if header.version == 11 {
-            println!("Pipeline  : Optica (Photon Synthesis + Capillary Chroma + Hyper-Sparse rANS)");
+            println!(
+                "Pipeline  : Optica (Photon Synthesis + Capillary Chroma + Hyper-Sparse rANS)"
+            );
         } else if header.version == 8 {
             println!("Pipeline  : Edge-Energy DPCM + Hex Oracle");
         } else if header.version >= 2 {
@@ -129,6 +156,7 @@ fn cmd_encode(
     output: &PathBuf,
     quality: u8,
     pipeline: Pipeline,
+    lot_topology: aurea_core::lot::LotTopology,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t0 = Instant::now();
 
@@ -136,18 +164,11 @@ fn cmd_encode(
     let (width, height) = (img.width() as usize, img.height() as usize);
     let rgb = img.into_raw();
 
-    let pipeline_name = match pipeline {
-        Pipeline::Optica => "Optica v11",
-        Pipeline::EdgeEnergy => "Edge-Energy v8",
-        Pipeline::EdgeEnergyDna => "Edge-Energy DNA v8",
-        Pipeline::HexPyramid => "Hex Pyramid v7",
-        Pipeline::LotAdn4 => "LOT v3/4",
-    };
-
-    println!("Encode AUREA {} : {} (q={})", pipeline_name, input.display(), quality);
+    println!("Encode AUREA v24 : {} (q={})", input.display(), quality);
     println!("  Image     : {}x{}", width, height);
 
-    let params = CodecParams::with_pipeline(pipeline, quality);
+    let mut params = CodecParams::with_pipeline(pipeline, quality);
+    params.lot_topology = lot_topology;
     let result = aurea_encoder::encode_unified(&rgb, width, height, &params)?;
 
     fs::write(output, &result.aurea_data)?;
@@ -157,7 +178,11 @@ fn cmd_encode(
     let bpp = result.compressed_size as f64 * 8.0 / n as f64;
     let ratio = (n * 3) as f64 / result.compressed_size as f64;
 
-    println!("  Output    : {} ({} bytes)", output.display(), result.compressed_size);
+    println!(
+        "  Output    : {} ({} bytes)",
+        output.display(),
+        result.compressed_size
+    );
     println!("  Ratio     : {:.1}x vs RAW ({:.2} bpp)", ratio, bpp);
     println!("  Time      : {:.0} ms", elapsed.as_secs_f64() * 1000.0);
 
@@ -168,12 +193,31 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match &cli.command {
-        Commands::Decode { input, output } => cmd_decode(input, output),
-        Commands::Encode { input, output, quality, pipeline } => {
-            let out = output.clone().unwrap_or_else(|| input.with_extension("aur"));
-            match parse_pipeline(pipeline) {
-                Ok(p) => cmd_encode(input, &out, *quality, p),
-                Err(e) => Err(e.into()),
+        Commands::Decode {
+            input,
+            output,
+            layers,
+        } => cmd_decode(input, output, *layers),
+        Commands::Encode {
+            input,
+            output,
+            quality,
+            pipeline,
+            lot_topology,
+        } => {
+            let out = output
+                .clone()
+                .unwrap_or_else(|| input.with_extension("aur"));
+            match (
+                parse_pipeline(pipeline),
+                aurea_core::lot::LotTopology::parse(lot_topology),
+            ) {
+                (Ok(p), Some(t)) => cmd_encode(input, &out, *quality, p, t),
+                (Err(e), _) => Err(e.into()),
+                (_, None) => Err(format!(
+                    "Unknown lot topology '{lot_topology}'. Choose: adaptive-critical,                      fixed16-critical, fixed16-lapped50, adaptive16x32-lapped50"
+                )
+                .into()),
             }
         }
         Commands::Info { input } => cmd_info(input),

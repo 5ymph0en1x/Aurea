@@ -17,7 +17,9 @@ pub enum Pipeline {
 }
 
 impl Default for Pipeline {
-    fn default() -> Self { Pipeline::EdgeEnergy }
+    fn default() -> Self {
+        Pipeline::EdgeEnergy
+    }
 }
 
 /// Centralized codec parameters.
@@ -38,13 +40,17 @@ pub struct CodecParams {
     pub hex_radius: usize,
 
     // --- Optica v11 ---
-    pub photon_injection_ratio: f64,  // decoder noise re-injection level (0.0-1.0)
-    pub capillary_sigma_guide: f64,   // edge sensitivity for chroma SOR diffusion
-    pub capillary_sor_iter: usize,    // SOR iterations for chroma reconstruction
+    pub photon_injection_ratio: f64, // decoder noise re-injection level (0.0-1.0)
+    pub capillary_sigma_guide: f64,  // edge sensitivity for chroma SOR diffusion
+    pub capillary_sor_iter: usize,   // SOR iterations for chroma reconstruction
 
     // --- Post-decode sharpening ---
-    pub post_sharpen: u8,        // 0 = off, 1 = unsharp, 2 = casp, 3 = adaptive
-    pub sharpen_strength: f64,   // force (0.0..1.0 for CASP, larger for others)
+    pub post_sharpen: u8,      // 0 = off, 1 = unsharp, 2 = casp, 3 = adaptive
+    pub sharpen_strength: f64, // force (0.0..1.0 for CASP, larger for others)
+
+    /// P0: which block lattice the transform runs on. Must default to
+    /// `AdaptiveCritical` so standard output stays byte-identical to v27.
+    pub lot_topology: crate::lot::LotTopology,
 }
 
 impl Default for CodecParams {
@@ -60,18 +66,26 @@ impl Default for CodecParams {
             photon_injection_ratio: 0.3,
             capillary_sigma_guide: 10.0,
             capillary_sor_iter: 30,
-            post_sharpen: 2,       // CASP by default
+            post_sharpen: 2, // CASP by default
             sharpen_strength: 0.5,
+            lot_topology: crate::lot::LotTopology::AdaptiveCritical,
         }
     }
 }
 
 impl CodecParams {
     pub fn with_quality(quality: u8) -> Self {
-        CodecParams { quality, ..Default::default() }
+        CodecParams {
+            quality,
+            ..Default::default()
+        }
     }
 
     pub fn with_pipeline(pipeline: Pipeline, quality: u8) -> Self {
-        CodecParams { pipeline, quality, ..Default::default() }
+        CodecParams {
+            pipeline,
+            quality,
+            ..Default::default()
+        }
     }
 }

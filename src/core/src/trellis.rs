@@ -70,10 +70,15 @@ fn run_class(run_zeros: u32) -> u8 {
 
 #[inline]
 fn energy_bucket(energy: u32) -> u8 {
-    if energy < 16 { 0 }
-    else if energy < 64 { 1 }
-    else if energy < 160 { 2 }
-    else { 3 }
+    if energy < 16 {
+        0
+    } else if energy < 64 {
+        1
+    } else if energy < 160 {
+        2
+    } else {
+        3
+    }
 }
 
 /// Representative energy value for each bucket (midpoint, used for IIR approximation).
@@ -95,9 +100,9 @@ fn bucket_representative(eb: u8) -> u32 {
 /// Packed into 16 bits for efficient indexing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct TState {
-    run_zeros: u8,      // 0-4 (capped at 4 = "4+" bucket)
+    run_zeros: u8, // 0-4 (capped at 4 = "4+" bucket)
     prev_nz: bool,
-    energy_bucket: u8,  // 0-3
+    energy_bucket: u8, // 0-3
     prev_was_pm1: bool,
 }
 
@@ -173,16 +178,31 @@ impl TState {
 }
 
 // ======================================================================
-// Probability snapshot
+// Probability trace (incremental snapshots)
 // ======================================================================
 
-/// Snapshot of the rANS v12 context model at one zigzag position.
-/// Captured during a greedy forward simulation for use by the trellis.
+/// One context-model update recorded after coding one position's symbol.
+/// The v12 model touches exactly one P(zero) entry per symbol and at most
+/// one P(±1|nz) entry, so replaying these deltas reproduces the exact
+/// table state that a full 640-byte snapshot used to capture — for 16 bytes
+/// per position instead of 640.
+#[derive(Clone, Copy)]
+struct CtxDelta {
+    /// p_zero index updated after this position
+    cz: u16,
+    /// value of p_zero[cz] after the update
+    new_zero: u32,
+    /// p_pm1 index updated after this position, or -1 if none
+    cp: i16,
+    /// value of p_pm1[cp] after the update (valid when cp >= 0)
+    new_pm1: u32,
+}
+
+/// Incremental record of the rANS v12 context model along one block's
+/// greedy forward pass. `deltas[i]` is the update applied *after* coding
+/// position i; the state *before* position i is INIT + deltas[0..i].
 pub struct CtxSnapshot {
-    /// P(zero) table (128 entries) at this position
-    p_zero: [u32; 128],
-    /// P(±1|nz) table (32 entries) at this position
-    p_pm1: [u32; 32],
+    deltas: Vec<CtxDelta>,
 }
 
 // ======================================================================
@@ -190,10 +210,16 @@ pub struct CtxSnapshot {
 // ======================================================================
 
 /// Estimate the bit cost of coding quantized value `q` given state `state`
-/// and probability tables from the snapshot.
+/// and the live probability tables (replayed from the delta trace).
 #[inline]
-fn rate_cost(q: i16, state: &TState, snap: &CtxSnapshot, tb: u8) -> f64 {
-    let p_zero = snap.p_zero[state.zero_ctx(tb)].clamp(1, PROB_SCALE - 1);
+fn rate_cost(
+    q: i16,
+    state: &TState,
+    p_zero_tab: &[u32; 128],
+    p_pm1_tab: &[u32; 32],
+    tb: u8,
+) -> f64 {
+    let p_zero = p_zero_tab[state.zero_ctx(tb)].clamp(1, PROB_SCALE - 1);
 
     if q == 0 {
         return bits_from_prob(p_zero);
@@ -205,7 +231,7 @@ fn rate_cost(q: i16, state: &TState, snap: &CtxSnapshot, tb: u8) -> f64 {
     // Sign bit (equiprobable)
     bits += 1.0;
 
-    let p_pm1 = snap.p_pm1[state.pm1_ctx(tb)].clamp(1, PROB_SCALE - 1);
+    let p_pm1 = p_pm1_tab[state.pm1_ctx(tb)].clamp(1, PROB_SCALE - 1);
 
     if abs_v == 1 {
         bits += bits_from_prob(p_pm1);
@@ -235,12 +261,28 @@ pub fn greedy_quantize_and_snapshot(
     pos_steps: &[f64],
     dead_zones: &[f64],
     turing_bucket: u8,
-) -> (Vec<i16>, Vec<CtxSnapshot>) {
+    capture: bool,
+) -> (Vec<i16>, CtxSnapshot) {
     let n = coeffs.len();
     let mut qvals = Vec::with_capacity(n);
-    let mut snapshots = Vec::with_capacity(n);
+    let mut deltas = Vec::with_capacity(if capture { n } else { 0 });
 
-    // Simulate the rANS v12 context model forward pass
+    // Simulate the rANS v12 context model forward pass.
+    //
+    // These tables restart flat at every block so blocks stay independent and
+    // the parallel map reproduces the sequential decisions bit-exactly. Cycle 27
+    // tried priming them from the converged tables of a first pass, blending
+    // toward flat with a weight: every weight lost, monotonically (+0.270 % RGB
+    // BD-rate at 0.25, +0.558 % at 0.5, +1.147 % at 1.0, 0/16 dominating points
+    // at each). The tables a second pass learns come from the first pass's own
+    // decisions, so feeding them back optimizes against its own shadow; and a
+    // per-block optimizer cannot account for the fact that its choices shift the
+    // shared tables for every later block. The flat prior regularizes both.
+    //
+    // A consequence worth recording: with flat priors all 128 slots hold the
+    // same value, `turing_bucket` is constant within a block, and only the slice
+    // it selects is ever touched — so the bucket provably cannot change a single
+    // decision here. It is kept because it mirrors the coder's index layout.
     let mut p_zero = [P_ZERO_INIT; 128];
     let mut p_pm1 = [P_PM1_INIT; 32];
     let mut energy: u32 = 0;
@@ -250,12 +292,6 @@ pub fn greedy_quantize_and_snapshot(
     let tb = turing_bucket.min(3);
 
     for i in 0..n {
-        // Capture snapshot BEFORE processing this symbol
-        snapshots.push(CtxSnapshot {
-            p_zero,
-            p_pm1,
-        });
-
         // Greedy quantization
         let coeff = coeffs[i];
         let step = pos_steps[i];
@@ -268,7 +304,7 @@ pub fn greedy_quantize_and_snapshot(
 
         // Update context model (mirror ContextModelV12::update)
         let is_zero = qi == 0;
-        let is_pm1 = qi.abs() == 1;
+        let is_pm1 = qi.unsigned_abs() == 1;
         let abs_val = qi.unsigned_abs() as u32;
 
         // Adapt P(zero)
@@ -282,6 +318,8 @@ pub fn greedy_quantize_and_snapshot(
             p_zero[cz] -= p_zero[cz] >> ADAPT_SHIFT;
         }
 
+        let mut cp_recorded: i16 = -1;
+        let mut new_pm1_recorded: u32 = 0;
         if !is_zero {
             let pp = if prev_was_pm1 { 1 } else { 0 };
             let cp = eb * 8 + pp * 4 + tb as usize;
@@ -290,13 +328,23 @@ pub fn greedy_quantize_and_snapshot(
             } else {
                 p_pm1[cp] -= p_pm1[cp] >> ADAPT_SHIFT;
             }
+            cp_recorded = cp as i16;
+            new_pm1_recorded = p_pm1[cp];
+        }
+
+        if capture {
+            deltas.push(CtxDelta {
+                cz: cz as u16,
+                new_zero: p_zero[cz],
+                cp: cp_recorded,
+                new_pm1: new_pm1_recorded,
+            });
         }
 
         // Energy IIR
         let sample_energy = (abs_val * 32).min(ENERGY_SCALE);
-        energy = (ENERGY_ALPHA * energy
-            + (ENERGY_SCALE - ENERGY_ALPHA) * sample_energy)
-            / ENERGY_SCALE;
+        energy =
+            (ENERGY_ALPHA * energy + (ENERGY_SCALE - ENERGY_ALPHA) * sample_energy) / ENERGY_SCALE;
 
         // Run/nz state
         if is_zero {
@@ -308,7 +356,7 @@ pub fn greedy_quantize_and_snapshot(
         prev_nz = !is_zero;
     }
 
-    (qvals, snapshots)
+    (qvals, CtxSnapshot { deltas })
 }
 
 // ======================================================================
@@ -318,13 +366,17 @@ pub fn greedy_quantize_and_snapshot(
 #[derive(Clone, Copy)]
 struct TNode {
     cost: f64,
-    prev_idx: u8,   // index into previous stage's active state list
+    prev_idx: u8, // index into previous stage's active state list
     quant_val: i16,
 }
 
 impl TNode {
     fn penalty() -> Self {
-        Self { cost: f64::MAX, prev_idx: 0, quant_val: 0 }
+        Self {
+            cost: f64::MAX,
+            prev_idx: 0,
+            quant_val: 0,
+        }
     }
 }
 
@@ -332,7 +384,8 @@ impl TNode {
 // Core Viterbi trellis
 // ======================================================================
 
-/// Trellis-optimized quantization for one block of AC coefficients.
+/// Trellis-optimized quantization for one block of AC coefficients using the
+/// historical unit transform-domain distortion weight.
 ///
 /// # Arguments
 /// - `coeffs`: raw LOT AC coefficients in zigzag order
@@ -350,29 +403,135 @@ pub fn trellis_quantize_block(
     dead_zones: &[f64],
     turing_bucket: u8,
     lambda: f64,
-    snapshots: &[CtxSnapshot],
+    snapshots: &CtxSnapshot,
+) -> (Vec<i16>, usize) {
+    trellis_quantize_block_weighted(
+        coeffs,
+        pos_steps,
+        dead_zones,
+        turing_bucket,
+        lambda,
+        1.0,
+        snapshots,
+    )
+}
+
+/// Trellis-optimized quantization with an explicit transform-channel
+/// distortion weight. A larger value spends more rate to preserve the
+/// channel; a smaller value yields rate. The weight is encoder-only and does
+/// not alter the bitstream grammar.
+pub fn trellis_quantize_block_weighted(
+    coeffs: &[f64],
+    pos_steps: &[f64],
+    dead_zones: &[f64],
+    turing_bucket: u8,
+    lambda: f64,
+    distortion_weight: f64,
+    snapshots: &CtxSnapshot,
+) -> (Vec<i16>, usize) {
+    let mut scratch = TrellisScratch::default();
+    trellis_quantize_block_scratch(
+        coeffs,
+        pos_steps,
+        dead_zones,
+        turing_bucket,
+        lambda,
+        distortion_weight,
+        snapshots,
+        &mut scratch,
+    )
+}
+
+/// Reusable working memory for [`trellis_quantize_block_scratch`]. The flat
+/// traceback used to be a fresh `vec![penalty(); n * max_states]` per block
+/// (~65 KB of memset for a 16×16 block, gigabytes over an image): every
+/// entry the traceback reads is bounded by `tb_lens`, so stale values from
+/// a previous block are provably never observed and the buffers can persist
+/// across blocks — one scratch per rayon worker via `map_init`.
+#[derive(Default)]
+pub struct TrellisScratch {
+    tb_nodes: Vec<TNode>,
+    tb_lens: Vec<u8>,
+    prev_states: Vec<(TState, TNode)>,
+    next_map: Vec<(TState, TNode)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn trellis_quantize_block_scratch(
+    coeffs: &[f64],
+    pos_steps: &[f64],
+    dead_zones: &[f64],
+    turing_bucket: u8,
+    lambda: f64,
+    distortion_weight: f64,
+    snapshots: &CtxSnapshot,
+    scratch: &mut TrellisScratch,
 ) -> (Vec<i16>, usize) {
     let n = coeffs.len();
     if n == 0 {
         return (Vec::new(), 0);
     }
+    let distortion_weight = if distortion_weight.is_finite() {
+        distortion_weight.clamp(0.05, 8.0)
+    } else {
+        1.0
+    };
 
-    let max_states = if n > 300 { MAX_STATES_LARGE } else { MAX_STATES };
+    let max_states = if n > 300 {
+        MAX_STATES_LARGE
+    } else {
+        MAX_STATES
+    };
     let tb = turing_bucket.min(3);
 
-    // Active state list: (TState, TNode) pairs
-    // We keep two lists and swap them each stage.
-    let mut prev_states: Vec<(TState, TNode)> = Vec::with_capacity(max_states);
-    prev_states.push((TState::initial(), TNode { cost: 0.0, prev_idx: 0, quant_val: 0 }));
+    // Live probability tables, replayed from the greedy delta trace. The
+    // state before position i is INIT + deltas[0..i], exactly what the old
+    // full per-position snapshots stored.
+    let mut p_zero = [P_ZERO_INIT; 128];
+    let mut p_pm1 = [P_PM1_INIT; 32];
 
-    // Traceback storage: for each stage, store the list of (state, node) pairs
-    let mut traceback: Vec<Vec<(TState, TNode)>> = Vec::with_capacity(n);
+    // Active state list: (TState, TNode) pairs — double buffer, reused.
+    let prev_states = &mut scratch.prev_states;
+    let next_map = &mut scratch.next_map;
+    prev_states.clear();
+    next_map.clear();
+    prev_states.push((
+        TState::initial(),
+        TNode {
+            cost: 0.0,
+            prev_idx: 0,
+            quant_val: 0,
+        },
+    ));
+
+    // Flat traceback storage: stage i occupies tb_nodes[i*max_states..],
+    // tb_lens[i] entries valid. Only the TNode part is needed for traceback,
+    // and only the first tb_lens[i] entries of a stage are ever read — the
+    // buffers grow monotonically and are never re-initialized.
+    if scratch.tb_nodes.len() < n * max_states {
+        scratch.tb_nodes.resize(n * max_states, TNode::penalty());
+    }
+    if scratch.tb_lens.len() < n {
+        scratch.tb_lens.resize(n, 0);
+    }
+    let tb_nodes = &mut scratch.tb_nodes;
+    let tb_lens = &mut scratch.tb_lens;
+
+    // pack() -> slot in next_map, 0xFF = empty. Reset per stage (128 bytes).
+    let mut state_slot = [0xFFu8; 128];
 
     for i in 0..n {
         let coeff = coeffs[i];
         let step = pos_steps[i];
         let dz = dead_zones[i];
-        let snap = &snapshots[i];
+        if i > 0 {
+            // Apply the context-model update recorded after position i-1.
+            let delta = &snapshots.deltas[i - 1];
+            p_zero[delta.cz as usize] = delta.new_zero;
+            if delta.cp >= 0 {
+                p_pm1[delta.cp as usize] = delta.new_pm1;
+            }
+        }
 
         // Generate candidates
         let inv_step = 1.0 / step;
@@ -380,19 +539,20 @@ pub fn trellis_quantize_block(
         let qv = (coeff.abs() * inv_step + 0.5 - dz).floor();
         let q0 = if qv > 0.0 { (sign * qv) as i16 } else { 0i16 };
 
-        let candidates = generate_candidates(q0, coeff, step);
+        let (candidates, n_cands) = generate_candidates(q0, coeff, step);
 
         // Build next state list
-        let mut next_map: Vec<(TState, TNode)> = Vec::with_capacity(prev_states.len() * candidates.len());
+        next_map.clear();
+        state_slot.fill(0xFF);
 
         for (src_idx, (src_state, src_node)) in prev_states.iter().enumerate() {
-            for &q_cand in &candidates {
+            for &q_cand in &candidates[..n_cands] {
                 // Distortion
                 let err = coeff - q_cand as f64 * step;
-                let d = err * err;
+                let d = distortion_weight * err * err;
 
                 // Rate
-                let r = rate_cost(q_cand, src_state, snap, tb);
+                let r = rate_cost(q_cand, src_state, &p_zero, &p_pm1, tb);
 
                 // RD cost
                 let j = d + lambda * r;
@@ -405,12 +565,15 @@ pub fn trellis_quantize_block(
                     quant_val: q_cand,
                 };
 
-                // Insert or update: keep best cost per state
-                if let Some(existing) = next_map.iter_mut().find(|(s, _)| *s == dst_state) {
+                // Insert or update: keep best cost per state (O(1) via slot map)
+                let slot = state_slot[dst_state.pack()];
+                if slot != 0xFF {
+                    let existing = &mut next_map[slot as usize];
                     if total < existing.1.cost {
                         existing.1 = dst_node;
                     }
                 } else {
+                    state_slot[dst_state.pack()] = next_map.len() as u8;
                     next_map.push((dst_state, dst_node));
                 }
             }
@@ -418,39 +581,59 @@ pub fn trellis_quantize_block(
 
         // Prune: keep only top max_states by cost
         if next_map.len() > max_states {
-            next_map.sort_by(|a, b| a.1.cost.partial_cmp(&b.1.cost).unwrap_or(std::cmp::Ordering::Equal));
+            next_map.sort_by(|a, b| {
+                a.1.cost
+                    .partial_cmp(&b.1.cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             next_map.truncate(max_states);
         }
 
-        traceback.push(std::mem::replace(&mut prev_states, Vec::new()));
-        prev_states = next_map;
+        // Persist this stage's incoming states to the flat traceback.
+        let base = i * max_states;
+        tb_lens[i] = prev_states.len() as u8;
+        for (j, (_, node)) in prev_states.iter().enumerate() {
+            tb_nodes[base + j] = *node;
+        }
+        std::mem::swap(prev_states, next_map);
     }
 
     // Find best final state
-    let best_final_idx = prev_states.iter()
+    let best_final_idx = prev_states
+        .iter()
         .enumerate()
-        .min_by(|a, b| a.1 .1.cost.partial_cmp(&b.1 .1.cost).unwrap_or(std::cmp::Ordering::Equal))
+        .min_by(|a, b| {
+            a.1.1
+                .cost
+                .partial_cmp(&b.1.1.cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|(idx, _)| idx)
         .unwrap_or(0);
 
     // Backward traceback
     let mut result = vec![0i16; n];
-    let mut cur_idx = best_final_idx;
+    let cur_idx = best_final_idx;
 
     // Last stage value
     result[n - 1] = prev_states[cur_idx].1.quant_val;
     let mut trace_idx = prev_states[cur_idx].1.prev_idx as usize;
 
     for i in (0..n - 1).rev() {
-        let stage = &traceback[i + 1];
-        if trace_idx < stage.len() {
-            result[i] = stage[trace_idx].1.quant_val;
-            trace_idx = stage[trace_idx].1.prev_idx as usize;
+        let base = (i + 1) * max_states;
+        let stage_len = tb_lens[i + 1] as usize;
+        if trace_idx < stage_len {
+            result[i] = tb_nodes[base + trace_idx].quant_val;
+            trace_idx = tb_nodes[base + trace_idx].prev_idx as usize;
         }
     }
 
     // EOB: find last non-zero
-    let eob = result.iter().rposition(|&v| v != 0).map(|p| p + 1).unwrap_or(0);
+    let eob = result
+        .iter()
+        .rposition(|&v| v != 0)
+        .map(|p| p + 1)
+        .unwrap_or(0);
 
     (result, eob)
 }
@@ -458,23 +641,26 @@ pub fn trellis_quantize_block(
 /// Generate quantization candidates for a coefficient.
 /// Returns 1-3 candidates: greedy, toward-zero, and possibly zero.
 #[inline]
-fn generate_candidates(q0: i16, coeff: f64, step: f64) -> Vec<i16> {
+fn generate_candidates(q0: i16, coeff: f64, step: f64) -> ([i16; 3], usize) {
     let abs_q0 = q0.unsigned_abs();
     let normalized = coeff.abs() / step;
 
     // Trivial: coefficient is negligible
     if normalized < 0.1 {
-        return vec![0];
+        return ([0, 0, 0], 1);
     }
 
-    let mut cands = Vec::with_capacity(3);
-    cands.push(q0);
+    let mut cands = [0i16; 3];
+    let mut n_cands = 0usize;
+    cands[n_cands] = q0;
+    n_cands += 1;
 
     if q0 == 0 {
         // Greedy says zero. Also consider ±1 if coefficient is close to threshold.
         if normalized > 0.3 {
             let sign = if coeff >= 0.0 { 1i16 } else { -1 };
-            cands.push(sign);
+            cands[n_cands] = sign;
+            n_cands += 1;
         }
     } else {
         // Round toward zero by 1
@@ -484,15 +670,17 @@ fn generate_candidates(q0: i16, coeff: f64, step: f64) -> Vec<i16> {
             let sign = if q0 > 0 { 1i16 } else { -1 };
             sign * (abs_q0 as i16 - 1)
         };
-        cands.push(q_down);
+        cands[n_cands] = q_down;
+        n_cands += 1;
 
         // Also consider zero if the coefficient is small
         if abs_q0 <= 4 && q_down != 0 {
-            cands.push(0);
+            cands[n_cands] = 0;
+            n_cands += 1;
         }
     }
 
-    cands
+    (cands, n_cands)
 }
 
 // ======================================================================
@@ -511,8 +699,17 @@ mod tests {
             for pnz in [false, true] {
                 for eb in 0..=3u8 {
                     for pp in [false, true] {
-                        let s = TState { run_zeros: run, prev_nz: pnz, energy_bucket: eb, prev_was_pm1: pp };
-                        assert!(seen.insert(s.pack()), "Duplicate pack for {:?}", (run, pnz, eb, pp));
+                        let s = TState {
+                            run_zeros: run,
+                            prev_nz: pnz,
+                            energy_bucket: eb,
+                            prev_was_pm1: pp,
+                        };
+                        assert!(
+                            seen.insert(s.pack()),
+                            "Duplicate pack for {:?}",
+                            (run, pnz, eb, pp)
+                        );
                     }
                 }
             }
@@ -522,7 +719,12 @@ mod tests {
     #[test]
     fn test_ctx_indices_match_rans() {
         // Verify our context index computation matches rans.rs layout
-        let s = TState { run_zeros: 0, prev_nz: true, energy_bucket: 2, prev_was_pm1: false };
+        let s = TState {
+            run_zeros: 0,
+            prev_nz: true,
+            energy_bucket: 2,
+            prev_was_pm1: false,
+        };
         let tb = 1u8;
         // zero_ctx: rc(0)*32 + pnz(1)*16 + eb(2)*4 + tb(1) = 0 + 16 + 8 + 1 = 25
         assert_eq!(s.zero_ctx(tb), 25);
@@ -544,7 +746,12 @@ mod tests {
 
     #[test]
     fn test_transition_nonzero() {
-        let s = TState { run_zeros: 3, prev_nz: false, energy_bucket: 0, prev_was_pm1: false };
+        let s = TState {
+            run_zeros: 3,
+            prev_nz: false,
+            energy_bucket: 0,
+            prev_was_pm1: false,
+        };
         let s2 = s.transition(5);
         assert_eq!(s2.run_zeros, 0);
         assert!(s2.prev_nz);
@@ -557,11 +764,17 @@ mod tests {
     #[test]
     fn test_rate_cost_zero_is_cheap() {
         // With default probabilities, P(zero)=14000/16384 ≈ 85.4%, so coding zero is cheap
-        let snap = CtxSnapshot { p_zero: [P_ZERO_INIT; 128], p_pm1: [P_PM1_INIT; 32] };
+        let p_zero = [P_ZERO_INIT; 128];
+        let p_pm1 = [P_PM1_INIT; 32];
         let s = TState::initial();
-        let cost_zero = rate_cost(0, &s, &snap, 0);
-        let cost_one = rate_cost(1, &s, &snap, 0);
-        assert!(cost_zero < cost_one, "zero should be cheaper: {} vs {}", cost_zero, cost_one);
+        let cost_zero = rate_cost(0, &s, &p_zero, &p_pm1, 0);
+        let cost_one = rate_cost(1, &s, &p_zero, &p_pm1, 0);
+        assert!(
+            cost_zero < cost_one,
+            "zero should be cheaper: {} vs {}",
+            cost_zero,
+            cost_one
+        );
         assert!(cost_zero < 0.5, "zero should be very cheap: {}", cost_zero);
     }
 
@@ -570,9 +783,9 @@ mod tests {
         let coeffs = vec![0.0; 10];
         let steps = vec![1.0; 10];
         let dzs = vec![0.2; 10];
-        let (qvals, snaps) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 0);
+        let (qvals, snaps) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 0, true);
         assert!(qvals.iter().all(|&v| v == 0));
-        assert_eq!(snaps.len(), 10);
+        assert_eq!(snaps.deltas.len(), 10);
     }
 
     #[test]
@@ -581,7 +794,7 @@ mod tests {
         let coeffs = vec![2.3, 0.4, -1.7, 0.0, 3.1, 0.2, -0.1, 0.0];
         let steps = vec![1.0; 8];
         let dzs = vec![0.15; 8];
-        let (greedy, snapshots) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 0);
+        let (greedy, snapshots) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 0, true);
         let (trellis, _eob) = trellis_quantize_block(&coeffs, &steps, &dzs, 0, 0.0, &snapshots);
         assert_eq!(greedy, trellis, "lambda=0 should produce greedy result");
     }
@@ -592,7 +805,7 @@ mod tests {
         let coeffs = vec![1.5, 0.8, -0.6, 0.3, 2.1];
         let steps = vec![1.0; 5];
         let dzs = vec![0.15; 5];
-        let (_, snapshots) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 0);
+        let (_, snapshots) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 0, true);
         let (trellis, eob) = trellis_quantize_block(&coeffs, &steps, &dzs, 0, 1e6, &snapshots);
         assert_eq!(eob, 0, "huge lambda should zero everything");
         assert!(trellis.iter().all(|&v| v == 0));
@@ -605,9 +818,12 @@ mod tests {
         coeffs[5] = 15.0; // very large
         let steps = vec![1.0; 20];
         let dzs = vec![0.15; 20];
-        let (_, snapshots) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 0);
+        let (_, snapshots) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 0, true);
         let (trellis, _eob) = trellis_quantize_block(&coeffs, &steps, &dzs, 0, 5.0, &snapshots);
-        assert!(trellis[5].abs() >= 10, "large coefficient should be preserved");
+        assert!(
+            trellis[5].abs() >= 10,
+            "large coefficient should be preserved"
+        );
     }
 
     #[test]
@@ -615,16 +831,37 @@ mod tests {
         // A small trailing ±1 should be zeroed at moderate lambda
         // because it saves the entire zero-run coding cost
         let mut coeffs = vec![0.0; 20];
-        coeffs[0] = 5.0;   // large, should survive
-        coeffs[19] = 0.6;  // small trailing, should be zeroed
+        coeffs[0] = 5.0; // large, should survive
+        coeffs[19] = 0.6; // small trailing, should be zeroed
         let steps = vec![1.0; 20];
         let dzs = vec![0.15; 20];
-        let (greedy, snapshots) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 0);
-        let (trellis, trellis_eob) = trellis_quantize_block(&coeffs, &steps, &dzs, 0, 3.0, &snapshots);
-        let greedy_eob = greedy.iter().rposition(|&v| v != 0).map(|p| p + 1).unwrap_or(0);
+        let (greedy, snapshots) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 0, true);
+        let (trellis, trellis_eob) =
+            trellis_quantize_block(&coeffs, &steps, &dzs, 0, 3.0, &snapshots);
+        let greedy_eob = greedy
+            .iter()
+            .rposition(|&v| v != 0)
+            .map(|p| p + 1)
+            .unwrap_or(0);
         // Trellis should produce shorter EOB by zeroing the trailing small coefficient
-        assert!(trellis_eob <= greedy_eob,
-            "trellis should zero trailing small coeff: trellis_eob={}, greedy_eob={}", trellis_eob, greedy_eob);
+        assert!(
+            trellis_eob <= greedy_eob,
+            "trellis should zero trailing small coeff: trellis_eob={}, greedy_eob={}",
+            trellis_eob,
+            greedy_eob
+        );
+    }
+
+    #[test]
+    fn test_unit_distortion_weight_is_bit_exact_with_legacy_entrypoint() {
+        let coeffs = vec![4.2, 1.1, -0.7, 0.0, 2.6, 0.3, -0.2, 0.0];
+        let steps = vec![1.0; coeffs.len()];
+        let dzs = vec![0.15; coeffs.len()];
+        let (_, snapshots) = greedy_quantize_and_snapshot(&coeffs, &steps, &dzs, 2, true);
+        let legacy = trellis_quantize_block(&coeffs, &steps, &dzs, 2, 2.5, &snapshots);
+        let weighted =
+            trellis_quantize_block_weighted(&coeffs, &steps, &dzs, 2, 2.5, 1.0, &snapshots);
+        assert_eq!(legacy, weighted);
     }
 
     #[test]

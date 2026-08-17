@@ -13,8 +13,8 @@ const Q_ALPHA: f64 = 11.0 / 13.0;
 const Q_BETA: f64 = 5.0 * PHI / 9.0;
 const Q_GAMMA: f64 = 176.0 * PI / 35.0;
 
-use std::sync::LazyLock;
 use rayon::prelude::*;
+use std::sync::LazyLock;
 
 // ---------------------------------------------------------------------------
 // 0. Precomputed cosine LUT — eliminates cos() from DCT hot loops
@@ -48,9 +48,13 @@ impl DctLut {
             let mut sum = 0.0;
             for i in 0..n {
                 // SAFETY: base + i = k*n + i < n*n = table.len(); i < n = input.len()
-                unsafe { sum += *input.get_unchecked(i) * *self.table.get_unchecked(base + i); }
+                unsafe {
+                    sum += *input.get_unchecked(i) * *self.table.get_unchecked(base + i);
+                }
             }
-            unsafe { *out.get_unchecked_mut(k) = sum; }
+            unsafe {
+                *out.get_unchecked_mut(k) = sum;
+            }
         }
     }
 
@@ -66,7 +70,61 @@ impl DctLut {
                     sum += 2.0 * *input.get_unchecked(k) * *self.table.get_unchecked(k * n + i);
                 }
             }
-            unsafe { *out.get_unchecked_mut(i) = sum * inv_n; }
+            unsafe {
+                *out.get_unchecked_mut(i) = sum * inv_n;
+            }
+        }
+    }
+
+    /// Forward DCT-II of every column of an h×w block (h == self.n), writing
+    /// dst[k][c] = sum_i src[i][c] * table[k*n+i]. Row-major accumulation with
+    /// the same per-element add order as the per-column path — bit-exact with
+    /// it, but contiguous (auto-vectorizable) and free of column copies.
+    fn dct_cols(&self, src: &[f64], dst: &mut [f64], w: usize) {
+        let n = self.n;
+        for k in 0..n {
+            let base = k * n;
+            let drow = &mut dst[k * w..k * w + w];
+            drow.fill(0.0);
+            for i in 0..n {
+                let t = self.table[base + i];
+                let srow = &src[i * w..i * w + w];
+                for (d, &s) in drow.iter_mut().zip(srow) {
+                    *d += t * s;
+                }
+            }
+        }
+    }
+
+    /// Inverse DCT-II of every column of an h×w block (h == self.n):
+    /// dst[i][c] = (src[0][c] + sum_{k>=1} 2*src[k][c]*table[k*n+i]) / n.
+    /// Same per-element accumulation order as the per-column path (bit-exact).
+    fn idct_cols(&self, src: &[f64], dst: &mut [f64], w: usize) {
+        let n = self.n;
+        let inv_n = 1.0 / n as f64;
+        // Initialize every output row with src row 0 (the DC term).
+        for i in 0..n {
+            dst[i * w..i * w + w].copy_from_slice(&src[..w]);
+        }
+        // Scratch row holding 2*src[k][c] — the (2.0 * input[k]) factor of the
+        // scalar path, hoisted out of the i loop with identical association.
+        let mut s2 = vec![0.0f64; w];
+        for k in 1..n {
+            let base = k * n;
+            let srow = &src[k * w..k * w + w];
+            for (v, &s) in s2.iter_mut().zip(srow) {
+                *v = 2.0 * s;
+            }
+            for i in 0..n {
+                let t = self.table[base + i];
+                let drow = &mut dst[i * w..i * w + w];
+                for (d, &s) in drow.iter_mut().zip(&s2) {
+                    *d += s * t;
+                }
+            }
+        }
+        for d in dst[..n * w].iter_mut() {
+            *d *= inv_n;
         }
     }
 }
@@ -182,21 +240,20 @@ pub fn dct_2d(block: &[f64], h: usize, w: usize) -> Vec<f64> {
         }
     }
 
-    // Transform columns
+    // Transform columns (row-major accumulation, bit-exact with per-column)
     let mut out = vec![0.0; h * w];
-    let mut col_in = vec![0.0; h];
-    let mut col_out = vec![0.0; h];
     if let Some(lut) = lut_h {
-        for c in 0..w {
-            for r in 0..h { col_in[r] = tmp[r * w + c]; }
-            lut.dct(&col_in, &mut col_out);
-            for r in 0..h { out[r * w + c] = col_out[r]; }
-        }
+        lut.dct_cols(&tmp, &mut out, w);
     } else {
+        let mut col_in = vec![0.0; h];
         for c in 0..w {
-            for r in 0..h { col_in[r] = tmp[r * w + c]; }
+            for r in 0..h {
+                col_in[r] = tmp[r * w + c];
+            }
             let t = dct_ii(&col_in);
-            for r in 0..h { out[r * w + c] = t[r]; }
+            for r in 0..h {
+                out[r * w + c] = t[r];
+            }
         }
     }
     out
@@ -209,21 +266,20 @@ pub fn idct_2d(coeffs: &[f64], h: usize, w: usize) -> Vec<f64> {
     let lut_w = get_dct_lut(w);
     let lut_h = get_dct_lut(h);
 
-    // Inverse-transform columns first
+    // Inverse-transform columns first (row-major, bit-exact with per-column)
     let mut tmp = vec![0.0; h * w];
-    let mut col_in = vec![0.0; h];
-    let mut col_out = vec![0.0; h];
     if let Some(lut) = lut_h {
-        for c in 0..w {
-            for r in 0..h { col_in[r] = coeffs[r * w + c]; }
-            lut.idct(&col_in, &mut col_out);
-            for r in 0..h { tmp[r * w + c] = col_out[r]; }
-        }
+        lut.idct_cols(coeffs, &mut tmp, w);
     } else {
+        let mut col_in = vec![0.0; h];
         for c in 0..w {
-            for r in 0..h { col_in[r] = coeffs[r * w + c]; }
+            for r in 0..h {
+                col_in[r] = coeffs[r * w + c];
+            }
             let t = idct_ii(&col_in);
-            for r in 0..h { tmp[r * w + c] = t[r]; }
+            for r in 0..h {
+                tmp[r * w + c] = t[r];
+            }
         }
     }
 
@@ -248,7 +304,9 @@ pub fn idct_2d(coeffs: &[f64], h: usize, w: usize) -> Vec<f64> {
 
 /// Sine window: w(i) = sin(pi * (i + 0.5) / n).
 pub fn sine_window(n: usize) -> Vec<f64> {
-    (0..n).map(|i| (PI * (i as f64 + 0.5) / n as f64).sin()).collect()
+    (0..n)
+        .map(|i| (PI * (i as f64 + 0.5) / n as f64).sin())
+        .collect()
 }
 
 /// Apply a separable 2-D window in-place.
@@ -307,7 +365,11 @@ pub fn lot_analyze_block(
 ) -> Vec<f64> {
     let stride = lot_stride(block_size, use_overlap);
     let use_window = stride < block_size; // window only with overlap
-    let offset = if use_window { (block_size / 2) as i64 } else { 0 };
+    let offset = if use_window {
+        (block_size / 2) as i64
+    } else {
+        0
+    };
     let ih = img_h as i64;
     let iw = img_w as i64;
 
@@ -345,7 +407,11 @@ pub fn lot_synthesize_block(
     let stride = lot_stride(block_size, use_overlap);
     let use_window = stride < block_size;
     let offset = if use_window { block_size / 2 } else { 0 };
-    let win = if use_window { cached_sine_window(block_size) } else { &[] };
+    let win = if use_window {
+        cached_sine_window(block_size)
+    } else {
+        &[]
+    };
 
     let mut spatial = idct_2d(coeffs, block_size, block_size);
     if use_window {
@@ -400,7 +466,15 @@ pub fn lot_analyze_image(
         .map(|idx| {
             let gy = idx / grid_w;
             let gx = idx % grid_w;
-            lot_analyze_block(image, h, w, gy * stride, gx * stride, block_size, use_overlap)
+            lot_analyze_block(
+                image,
+                h,
+                w,
+                gy * stride,
+                gx * stride,
+                block_size,
+                use_overlap,
+            )
         })
         .collect();
 
@@ -432,6 +506,7 @@ pub fn lot_synthesize_image(
     let n_blocks = grid_h * grid_w;
 
     // Phase 1: Parallel IDCT + windowing for all blocks
+    let _t_idct = crate::timing::stage("dec:idct");
     let spatial_blocks: Vec<Vec<f64>> = (0..n_blocks)
         .into_par_iter()
         .map(|idx| {
@@ -447,11 +522,17 @@ pub fn lot_synthesize_image(
         })
         .collect();
 
+    drop(_t_idct);
     // Phase 2: Sequential overlap-add (cheap: only additions)
+    let _t_oa = crate::timing::stage("dec:overlap_add");
     let mut output = vec![0.0; n];
     let mut weight = vec![0.0; n];
     let offset = if use_window { block_size / 2 } else { 0 };
-    let win = if use_window { cached_sine_window(block_size) } else { &[] };
+    let win = if use_window {
+        cached_sine_window(block_size)
+    } else {
+        &[]
+    };
 
     for idx in 0..n_blocks {
         let gy = idx / grid_w;
@@ -462,12 +543,16 @@ pub fn lot_synthesize_image(
 
         for r in 0..block_size {
             let py = by as i64 - offset as i64 + r as i64;
-            if py < 0 || py >= h as i64 { continue; }
+            if py < 0 || py >= h as i64 {
+                continue;
+            }
             let py = py as usize;
             let wh = if use_window { win[r] } else { 1.0 };
             for c in 0..block_size {
                 let px = bx as i64 - offset as i64 + c as i64;
-                if px < 0 || px >= w as i64 { continue; }
+                if px < 0 || px >= w as i64 {
+                    continue;
+                }
                 let px = px as usize;
                 let ww = if use_window { win[c] } else { 1.0 };
                 let w2 = wh * wh * ww * ww;
@@ -477,10 +562,17 @@ pub fn lot_synthesize_image(
         }
     }
 
+    drop(_t_oa);
     // Phase 3: Parallel normalization
-    output.par_iter_mut().zip(weight.par_iter()).for_each(|(o, &wt)| {
-        if wt > 1e-15 { *o /= wt; }
-    });
+    let _t_norm = crate::timing::stage("dec:normalization");
+    output
+        .par_iter_mut()
+        .zip(weight.par_iter())
+        .for_each(|(o, &wt)| {
+            if wt > 1e-15 {
+                *o /= wt;
+            }
+        });
     output
 }
 
@@ -504,13 +596,15 @@ pub const BLOCK_SIZES: [usize; 3] = [8, 16, 32];
 /// Factors are in [CODON_STRUCT_MIN, CODON_STRUCT_MAX]:
 /// - Low gradient (smooth) → high factor (compress aggressively)
 /// - High gradient (structure) → low factor (preserve detail)
-pub fn codon_structural_map(
-    dc_grid: &[f64], grid_h: usize, grid_w: usize,
-) -> Vec<f64> {
-    use crate::calibration::{Q_A, Q_ALPHA, Q_BETA, Q_GAMMA, CODON_STRUCT_FACTOR_MIN, CODON_STRUCT_FACTOR_MAX};
+pub fn codon_structural_map(dc_grid: &[f64], grid_h: usize, grid_w: usize) -> Vec<f64> {
+    use crate::calibration::{
+        CODON_STRUCT_FACTOR_MAX, CODON_STRUCT_FACTOR_MIN, Q_A, Q_ALPHA, Q_BETA, Q_GAMMA,
+    };
 
     let n = grid_h * grid_w;
-    if n == 0 { return Vec::new(); }
+    if n == 0 {
+        return Vec::new();
+    }
 
     // Phase 1: compute per-block DC gradient (max |DC_neighbor - DC_self|)
     let mut gradients = vec![0.0f64; n];
@@ -519,10 +613,18 @@ pub fn codon_structural_map(
             let idx = gy * grid_w + gx;
             let dc = dc_grid[idx];
             let mut max_grad = 0.0f64;
-            if gy > 0        { max_grad = max_grad.max((dc_grid[(gy-1)*grid_w + gx] - dc).abs()); }
-            if gy+1 < grid_h { max_grad = max_grad.max((dc_grid[(gy+1)*grid_w + gx] - dc).abs()); }
-            if gx > 0        { max_grad = max_grad.max((dc_grid[gy*grid_w + gx-1] - dc).abs()); }
-            if gx+1 < grid_w { max_grad = max_grad.max((dc_grid[gy*grid_w + gx+1] - dc).abs()); }
+            if gy > 0 {
+                max_grad = max_grad.max((dc_grid[(gy - 1) * grid_w + gx] - dc).abs());
+            }
+            if gy + 1 < grid_h {
+                max_grad = max_grad.max((dc_grid[(gy + 1) * grid_w + gx] - dc).abs());
+            }
+            if gx > 0 {
+                max_grad = max_grad.max((dc_grid[gy * grid_w + gx - 1] - dc).abs());
+            }
+            if gx + 1 < grid_w {
+                max_grad = max_grad.max((dc_grid[gy * grid_w + gx + 1] - dc).abs());
+            }
             gradients[idx] = max_grad;
         }
     }
@@ -538,13 +640,16 @@ pub fn codon_structural_map(
     let f_min = CODON_STRUCT_FACTOR_MIN; // 0.80 (preserve structure)
     let f_max = CODON_STRUCT_FACTOR_MAX; // 1.30 (compress smooth gas)
 
-    gradients.iter().map(|&g| {
-        let ratio = (g / median_grad).clamp(0.0, 3.0);
-        // Linear ramp: ratio=0 → f_max, ratio=2 → f_min, clamp both ends
-        let t = (ratio / 2.0).clamp(0.0, 1.0); // 0=smooth, 1=structured
-        let factor = f_max + t * (f_min - f_max); // lerp from max to min
-        factor.clamp(f_min, f_max)
-    }).collect()
+    gradients
+        .iter()
+        .map(|&g| {
+            let ratio = (g / median_grad).clamp(0.0, 3.0);
+            // Linear ramp: ratio=0 → f_max, ratio=2 → f_min, clamp both ends
+            let t = (ratio / 2.0).clamp(0.0, 1.0); // 0=smooth, 1=structured
+            let factor = f_max + t * (f_min - f_max); // lerp from max to min
+            factor.clamp(f_min, f_max)
+        })
+        .collect()
 }
 
 /// Compute per-block foveal saliency map from DC grid.
@@ -558,13 +663,13 @@ pub fn codon_structural_map(
 /// Returns: per-block foveal step factor = φ^(-k * S_norm).
 /// Crests (edges, dark details): factor < 1 → finer step → preserve
 /// Valleys (smooth, bright): factor > 1 → coarser step → compress
-pub fn foveal_saliency_map(
-    dc_grid: &[f64], grid_h: usize, grid_w: usize,
-) -> Vec<f64> {
+pub fn foveal_saliency_map(dc_grid: &[f64], grid_h: usize, grid_w: usize) -> Vec<f64> {
     use crate::golden::PHI;
 
     let n = grid_h * grid_w;
-    if n == 0 { return Vec::new(); }
+    if n == 0 {
+        return Vec::new();
+    }
     let k = *crate::calibration::TUNABLE_FOVEAL_K;
 
     // Source 1: DC gradient Weber contrast
@@ -574,10 +679,18 @@ pub fn foveal_saliency_map(
             let idx = gy * grid_w + gx;
             let dc = dc_grid[idx];
             let mut max_grad = 0.0f64;
-            if gy > 0        { max_grad = max_grad.max((dc_grid[(gy-1)*grid_w + gx] - dc).abs()); }
-            if gy+1 < grid_h { max_grad = max_grad.max((dc_grid[(gy+1)*grid_w + gx] - dc).abs()); }
-            if gx > 0        { max_grad = max_grad.max((dc_grid[gy*grid_w + gx-1] - dc).abs()); }
-            if gx+1 < grid_w { max_grad = max_grad.max((dc_grid[gy*grid_w + gx+1] - dc).abs()); }
+            if gy > 0 {
+                max_grad = max_grad.max((dc_grid[(gy - 1) * grid_w + gx] - dc).abs());
+            }
+            if gy + 1 < grid_h {
+                max_grad = max_grad.max((dc_grid[(gy + 1) * grid_w + gx] - dc).abs());
+            }
+            if gx > 0 {
+                max_grad = max_grad.max((dc_grid[gy * grid_w + gx - 1] - dc).abs());
+            }
+            if gx + 1 < grid_w {
+                max_grad = max_grad.max((dc_grid[gy * grid_w + gx + 1] - dc).abs());
+            }
             // Weber: gradient normalized by local luminance
             weber_contrast[idx] = max_grad / (dc.abs() + 10.0);
         }
@@ -585,21 +698,30 @@ pub fn foveal_saliency_map(
 
     // Source 2: Luminance sensitivity (dark = more perceptible = higher saliency)
     // Inverse of luminance_trna: dark → high S, bright → low S
-    let lum_sensitivity: Vec<f64> = dc_grid.iter().map(|&dc| {
-        let lum_norm = (dc / 255.0).clamp(0.0, 1.0);
-        1.0 - lum_norm // dark=1.0, bright=0.0
-    }).collect();
+    let lum_sensitivity: Vec<f64> = dc_grid
+        .iter()
+        .map(|&dc| {
+            let lum_norm = (dc / 255.0).clamp(0.0, 1.0);
+            1.0 - lum_norm // dark=1.0, bright=0.0
+        })
+        .collect();
 
     // Normalize Weber contrast to [0, 1]
-    let max_weber = weber_contrast.iter().cloned().fold(0.0f64, f64::max).max(1e-6);
+    let max_weber = weber_contrast
+        .iter()
+        .cloned()
+        .fold(0.0f64, f64::max)
+        .max(1e-6);
 
     // Combine: S = 0.6 * weber + 0.4 * luminance_sensitivity
     // Then map to step factor: φ^(-k * S)
-    (0..n).map(|i| {
-        let weber_norm = (weber_contrast[i] / max_weber).min(1.0);
-        let s = 0.6 * weber_norm + 0.4 * lum_sensitivity[i];
-        PHI.powf(-k * s)
-    }).collect()
+    (0..n)
+        .map(|i| {
+            let weber_norm = (weber_contrast[i] / max_weber).min(1.0);
+            let s = 0.6 * weber_norm + 0.4 * lum_sensitivity[i];
+            PHI.powf(-k * s)
+        })
+        .collect()
 }
 
 /// Legacy codon_dc_factor — kept for spectral spin local_steps computation.
@@ -616,8 +738,11 @@ pub fn codon_3d_factor(_dc_l: f64, _dc_c1: f64, _dc_c2: f64, _ac_energy: f64, _n
 
 /// Legacy 4D codon — same as 3D.
 pub fn codon_4d_factor(
-    _dc_l: f64, _dc_c1: f64, _dc_c2: f64,
-    _ac_block: &[f64], _block_size: usize,
+    _dc_l: f64,
+    _dc_c1: f64,
+    _dc_c2: f64,
+    _ac_block: &[f64],
+    _block_size: usize,
 ) -> f64 {
     1.0
 }
@@ -630,7 +755,7 @@ pub fn lot_stride(block_size: usize, use_overlap: bool) -> usize {
     if use_overlap {
         block_size / 2
     } else {
-        block_size  // No overlap: critical sampling
+        block_size // No overlap: critical sampling
     }
 }
 
@@ -647,10 +772,21 @@ pub fn luminance_trna(dc_luminance: f64) -> f64 {
     let thresholds = crate::calibration::CODON_LUM_THRESHOLDS;
     // Use runtime-tunable tRNA (env var overridable)
     let trna = *crate::calibration::TUNABLE_TRNA;
-    if dc_luminance < thresholds[0] { trna[0] }       // dark
-    else if dc_luminance < thresholds[1] { trna[1] }   // mid-dark
-    else if dc_luminance < thresholds[2] { trna[2] }   // mid-bright (=1.0)
-    else { trna[3] }                                    // bright
+    if dc_luminance < thresholds[0] {
+        trna[0]
+    }
+    // dark
+    else if dc_luminance < thresholds[1] {
+        trna[1]
+    }
+    // mid-dark
+    else if dc_luminance < thresholds[2] {
+        trna[2]
+    }
+    // mid-bright (=1.0)
+    else {
+        trna[3]
+    } // bright
 }
 
 // ======================================================================
@@ -684,7 +820,9 @@ pub fn csf_qmat_factor(row: usize, col: usize, block_size: usize, dc_luminance: 
 ///
 /// Returns a factor in [0.8, 1.0]. Lower = finer quantization.
 pub fn structural_coherence_factor(ac: &[f64], block_size: usize) -> f64 {
-    if ac.len() < 4 { return 1.0; }
+    if ac.len() < 4 {
+        return 1.0;
+    }
 
     // Directional energy decomposition in frequency domain
     let mut h_energy = 0.0f64; // horizontal frequencies (first row, r=0)
@@ -694,19 +832,29 @@ pub fn structural_coherence_factor(ac: &[f64], block_size: usize) -> f64 {
     for r in 0..block_size {
         for c in 0..block_size {
             let idx = r * block_size + c;
-            if idx == 0 { continue; } // skip DC
+            if idx == 0 {
+                continue;
+            } // skip DC
             let ac_idx = idx - 1;
-            if ac_idx >= ac.len() { break; }
+            if ac_idx >= ac.len() {
+                break;
+            }
             let val = ac[ac_idx].abs();
 
-            if r == 0 { h_energy += val; }
-            else if c == 0 { v_energy += val; }
-            else { d_energy += val; }
+            if r == 0 {
+                h_energy += val;
+            } else if c == 0 {
+                v_energy += val;
+            } else {
+                d_energy += val;
+            }
         }
     }
 
     let total = h_energy + v_energy + d_energy;
-    if total < 1.0 { return 1.0; }
+    if total < 1.0 {
+        return 1.0;
+    }
 
     // Anisotropy: how dominant is one direction?
     let max_dir = h_energy.max(v_energy).max(d_energy);
@@ -793,22 +941,17 @@ pub static QMAT_32: LazyLock<[f64; 1024]> = LazyLock::new(|| build_qmat::<1024>(
 pub fn qmat_lookup(row: usize, col: usize, block_size: usize) -> f64 {
     let idx = row * block_size + col;
     match block_size {
-        8  => QMAT_8[idx],
+        8 => QMAT_8[idx],
         16 => QMAT_16[idx],
         32 => QMAT_32[idx],
-        _  => qmat_for_block_size(row, col, block_size),
+        _ => qmat_for_block_size(row, col, block_size),
     }
 }
 
 /// Classify every 8x8 cell into the largest block size whose local variance
 /// stays below `merge_thresh = step^2 * 0.25`.  Returns `(size_grid, grid_h,
 /// grid_w)` — one byte per 8x8 cell encoding the chosen block size.
-pub fn classify_blocks(
-    image: &[f64],
-    h: usize,
-    w: usize,
-    step: f64,
-) -> (Vec<u8>, usize, usize) {
+pub fn classify_blocks(image: &[f64], h: usize, w: usize, step: f64) -> (Vec<u8>, usize, usize) {
     let cell = 8usize;
     let grid_h = (h + cell - 1) / cell;
     let grid_w = (w + cell - 1) / cell;
@@ -863,7 +1006,9 @@ pub fn classify_blocks(
                     cnt += 1.0;
                 }
             }
-            if cnt > 0.0 { dc_means[dgy * dc_gw + dgx] = sum / cnt; }
+            if cnt > 0.0 {
+                dc_means[dgy * dc_gw + dgx] = sum / cnt;
+            }
         }
     }
     let supercordes = crate::dsp::supercordes_classify(&dc_means, dc_gh, dc_gw);
@@ -922,6 +1067,55 @@ pub fn classify_blocks(
         }
     }
 
+    // Cycle 37 — waking the sleeping 8×8. The grammar has carried the 8px
+    // code since v13 but no path ever produced one: the classifier only
+    // merged upward. Split an aligned 2×2 group of 16-cells when its
+    // activity says the 16 transform straddles mixed content:
+    // `AUREA_SPLIT8_K` scales the variance threshold (0 = off, the
+    // historical classifier bit-exactly), `AUREA_SPLIT8_HET` additionally
+    // requires max/min cell-variance heterogeneity — a uniformly textured
+    // block is well served by the 16, it is the edge-straddling block that
+    // wants the 8.
+    let split_k = crate::calibration::env_override("AUREA_SPLIT8_K").unwrap_or(0.0);
+    if split_k > 0.0 {
+        let het = crate::calibration::env_override("AUREA_SPLIT8_HET").unwrap_or(0.0);
+        let split_thresh = split_k * step * step;
+        for gy in (0..grid_h).step_by(2) {
+            for gx in (0..grid_w).step_by(2) {
+                let mut all16 = true;
+                let mut max_var = 0.0f64;
+                let mut min_var = f64::INFINITY;
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let cy = gy + dy;
+                        let cx = gx + dx;
+                        if cy >= grid_h || cx >= grid_w {
+                            all16 = false;
+                            continue;
+                        }
+                        if size_grid[cy * grid_w + cx] != 16 {
+                            all16 = false;
+                        }
+                        let v = var_grid[cy * grid_w + cx];
+                        max_var = max_var.max(v);
+                        min_var = min_var.min(v);
+                    }
+                }
+                if !all16 {
+                    continue;
+                }
+                let heterogeneous = het <= 0.0 || max_var > het * (min_var + 1e-9);
+                if max_var > split_thresh && heterogeneous {
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            size_grid[(gy + dy) * grid_w + (gx + dx)] = 8;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     (size_grid, grid_h, grid_w)
 }
 
@@ -970,6 +1164,86 @@ pub fn decode_block_map(bytes: &[u8], n_cells: usize) -> Vec<u8> {
 /// Iterate over the size grid and return unique blocks as `(block_y, block_x,
 /// block_size)`.  Each block is emitted once — its top-left 8x8 cell is used
 /// as the anchor and the centre is placed at `anchor + block_size/2`.
+// ======================================================================
+// P0 — transform topology
+// ======================================================================
+
+/// Which block lattice the transform runs on.
+///
+/// AUREA ships an adaptive 8/16/32 map at critical sampling: nothing laps,
+/// despite the name. `FLAG_LOT_OVERLAP` exists but is never set, and simply
+/// setting it would not help, because `iter_blocks` emits one block per *tile*
+/// — the flag only moves the anchor from the corner to the centre, it does not
+/// create a mesh of half-stride centres.
+///
+/// P0 therefore separates the question in two. A fixed 16x16 lattice isolates
+/// the effect of lapping from the effect of size adaptation; only once fixed
+/// lapping is proven does an adaptive lapped map become worth its complexity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum LotTopology {
+    /// v27 production path: adaptive 8/16/32 map, critical sampling.
+    #[default]
+    AdaptiveCritical,
+    /// Laboratory control: fixed 16x16, no overlap. Isolates size adaptation.
+    Fixed16Critical,
+    /// Fixed 16x16 with the sine window and 8 px centres — a true 50 % lap.
+    Fixed16Lapped50,
+    /// v28 adaptive 16/32 emitters on a genuinely overlapping centre map.
+    Adaptive16x32Lapped50,
+}
+
+impl LotTopology {
+    /// Parse the CLI spelling. Unknown values are rejected rather than
+    /// silently falling back, so an experiment can never mislabel itself.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "adaptive-critical" => Some(Self::AdaptiveCritical),
+            "fixed16-critical" => Some(Self::Fixed16Critical),
+            "fixed16-lapped50" => Some(Self::Fixed16Lapped50),
+            "adaptive16x32-lapped50" => Some(Self::Adaptive16x32Lapped50),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AdaptiveCritical => "adaptive-critical",
+            Self::Fixed16Critical => "fixed16-critical",
+            Self::Fixed16Lapped50 => "fixed16-lapped50",
+            Self::Adaptive16x32Lapped50 => "adaptive16x32-lapped50",
+        }
+    }
+
+    /// Does this topology carry a per-block size map?
+    ///
+    /// `Fixed16Critical` does: it is expressed as an adaptive map whose every
+    /// cell says 16, which is why it keeps the v27 grammar and needs no decoder
+    /// change at all. That is exactly what makes it a clean control for the
+    /// effect of size adaptation, isolated from any lapping.
+    pub fn uses_variable_blocks(self) -> bool {
+        !matches!(self, Self::Fixed16Lapped50)
+    }
+
+    /// Force every cell to one size, or `None` to let the classifier decide.
+    pub fn forced_cell_size(self) -> Option<u8> {
+        match self {
+            Self::Fixed16Critical => Some(16),
+            _ => None,
+        }
+    }
+
+    /// Does this topology place block centres at half the block size?
+    pub fn uses_overlap(self) -> bool {
+        matches!(self, Self::Fixed16Lapped50 | Self::Adaptive16x32Lapped50)
+    }
+
+    /// Every lapped topology is new grammar and must be marked AUR2 v28; the
+    /// two critical ones keep the historical version ladder.
+    pub fn requires_v28(self) -> bool {
+        self.uses_overlap()
+    }
+}
+
 pub fn iter_blocks(
     size_grid: &[u8],
     gh: usize,
@@ -1023,7 +1297,8 @@ pub fn lot_analyze_variable(
     let blocks = iter_blocks(size_grid, gh, gw, use_overlap);
 
     // Parallel block analysis: each block's DCT is independent
-    let results: Vec<(f64, Vec<f64>)> = blocks.par_iter()
+    let results: Vec<(f64, Vec<f64>)> = blocks
+        .par_iter()
         .map(|&(by, bx, bs)| {
             let coeffs = lot_analyze_block(image, h, w, by, bx, bs, use_overlap);
             let dc_scale = 256.0 / (bs * bs) as f64;
@@ -1056,7 +1331,10 @@ pub fn lot_synthesize_variable(
     let n = h * w;
 
     // Phase 1: Parallel IDCT + windowing for all blocks
-    let spatial_data: Vec<(usize, usize, usize, Vec<f64>)> = blocks.par_iter().enumerate()
+    let _t_idct = crate::timing::stage("dec:idct");
+    let spatial_data: Vec<(usize, usize, usize, Vec<f64>)> = blocks
+        .par_iter()
+        .enumerate()
         .map(|(i, &(by, bx, bs))| {
             let dc_inv_scale = (bs * bs) as f64 / 256.0;
             let ac_inv_scale = bs as f64 / 16.0;
@@ -1078,37 +1356,115 @@ pub fn lot_synthesize_variable(
         })
         .collect();
 
-    // Phase 2: Sequential overlap-add
+    drop(_t_idct);
+    let _t_oa = crate::timing::stage("dec:overlap_add");
+
+    // Critical-sampling fast path: without a window every pixel belongs to
+    // exactly one block, the weight accumulator is 1.0 everywhere and the
+    // normalization divides by one — three full-plane passes of pure waste.
+    // Writing each block directly is bit-exact (0.0 + x == x, x / 1.0 == x).
+    if !use_overlap {
+        let mut output = vec![0.0; n];
+        const BAND_ROWS: usize = 64;
+        output
+            .par_chunks_mut(BAND_ROWS * w)
+            .enumerate()
+            .for_each(|(band_idx, out_band)| {
+                let y0 = band_idx * BAND_ROWS;
+                let band_h = out_band.len() / w;
+                let y1 = y0 + band_h;
+                for &(by, bx, bs, ref spatial) in &spatial_data {
+                    let top = by as i64;
+                    let left = bx as i64;
+                    let r_lo = (y0 as i64 - top).max(0);
+                    let r_hi = (y1 as i64 - top).min(bs as i64);
+                    if r_lo >= r_hi {
+                        continue;
+                    }
+                    let c_lo = (-left).max(0) as usize;
+                    let c_hi = ((w as i64 - left).min(bs as i64)).max(0) as usize;
+                    if c_lo >= c_hi {
+                        continue;
+                    }
+                    for r in r_lo as usize..r_hi as usize {
+                        let py = (top + r as i64) as usize;
+                        let row_off = (py - y0) * w;
+                        let spat_row = &spatial[r * bs..r * bs + bs];
+                        let px0 = (left + c_lo as i64) as usize;
+                        out_band[row_off + px0..row_off + px0 + (c_hi - c_lo)]
+                            .copy_from_slice(&spat_row[c_lo..c_hi]);
+                    }
+                }
+            });
+        return output;
+    }
+
+    // Lapped path: overlap-add over disjoint row bands. Each pixel
+    // belongs to exactly one band and the blocks are visited in their original
+    // order inside every band, so the per-pixel accumulation order (and thus
+    // every floating-point sum) is identical to the sequential loop.
     let mut output = vec![0.0; n];
     let mut weight = vec![0.0; n];
 
-    for &(by, bx, bs, ref spatial) in &spatial_data {
-        let stride = lot_stride(bs, use_overlap);
-        let use_window = stride < bs;
-        let offset = if use_window { bs / 2 } else { 0 };
-        let win = if use_window { cached_sine_window(bs) } else { &[] };
-
-        for r in 0..bs {
-            let py = by as i64 - offset as i64 + r as i64;
-            if py < 0 || py >= h as i64 { continue; }
-            let py = py as usize;
-            let wh = if use_window { win[r] } else { 1.0 };
-            for c in 0..bs {
-                let px = bx as i64 - offset as i64 + c as i64;
-                if px < 0 || px >= w as i64 { continue; }
-                let px = px as usize;
-                let ww = if use_window { win[c] } else { 1.0 };
-                let w2 = wh * wh * ww * ww;
-                output[py * w + px] += spatial[r * bs + c];
-                weight[py * w + px] += w2;
+    const BAND_ROWS: usize = 64;
+    output
+        .par_chunks_mut(BAND_ROWS * w)
+        .zip(weight.par_chunks_mut(BAND_ROWS * w))
+        .enumerate()
+        .for_each(|(band_idx, (out_band, w_band))| {
+            let y0 = band_idx * BAND_ROWS;
+            let band_h = out_band.len() / w;
+            let y1 = y0 + band_h;
+            for &(by, bx, bs, ref spatial) in &spatial_data {
+                let stride = lot_stride(bs, use_overlap);
+                let use_window = stride < bs;
+                let offset = if use_window { bs / 2 } else { 0 };
+                let win = if use_window {
+                    cached_sine_window(bs)
+                } else {
+                    &[]
+                };
+                let top = by as i64 - offset as i64;
+                let left = bx as i64 - offset as i64;
+                // Row/column ranges of the block that fall inside this band.
+                let r_lo = (y0 as i64 - top).max(0);
+                let r_hi = (y1 as i64 - top).min(bs as i64);
+                if r_lo >= r_hi {
+                    continue;
+                }
+                let c_lo = (-left).max(0) as usize;
+                let c_hi = ((w as i64 - left).min(bs as i64)).max(0) as usize;
+                if c_lo >= c_hi {
+                    continue;
+                }
+                for r in r_lo as usize..r_hi as usize {
+                    let py = (top + r as i64) as usize;
+                    let wh = if use_window { win[r] } else { 1.0 };
+                    let wh2 = wh * wh;
+                    let row_off = (py - y0) * w;
+                    let spat_row = &spatial[r * bs..r * bs + bs];
+                    for c in c_lo..c_hi {
+                        let px = (left + c as i64) as usize;
+                        let ww = if use_window { win[c] } else { 1.0 };
+                        let w2 = wh2 * ww * ww;
+                        out_band[row_off + px] += spat_row[c];
+                        w_band[row_off + px] += w2;
+                    }
+                }
             }
-        }
-    }
+        });
 
+    drop(_t_oa);
     // Phase 3: Parallel normalization
-    output.par_iter_mut().zip(weight.par_iter()).for_each(|(o, &wt)| {
-        if wt > 1e-15 { *o /= wt; }
-    });
+    let _t_norm = crate::timing::stage("dec:normalization");
+    output
+        .par_iter_mut()
+        .zip(weight.par_iter())
+        .for_each(|(o, &wt)| {
+            if wt > 1e-15 {
+                *o /= wt;
+            }
+        });
     output
 }
 
@@ -1165,9 +1521,8 @@ mod tests {
         for r in 0..h {
             for c in 0..w {
                 // Gradient + sine pattern
-                image[r * w + c] = 50.0
-                    + 100.0 * (r as f64 / h as f64)
-                    + 30.0 * (PI * c as f64 / 8.0).sin();
+                image[r * w + c] =
+                    50.0 + 100.0 * (r as f64 / h as f64) + 30.0 * (PI * c as f64 / 8.0).sin();
             }
         }
 
@@ -1205,7 +1560,11 @@ mod tests {
         for (a, b) in image.iter().zip(recon.iter()) {
             max_err = max_err.max((a - b).abs());
         }
-        assert!(max_err < 0.1, "LOT overlap roundtrip max error = {} (should be < 0.1)", max_err);
+        assert!(
+            max_err < 0.1,
+            "LOT overlap roundtrip max error = {} (should be < 0.1)",
+            max_err
+        );
     }
 
     #[test]

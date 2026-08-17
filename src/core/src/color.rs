@@ -1,5 +1,4 @@
 /// YCbCr <-> RGB conversion (ITU-R BT.601) and 4:2:0 subsampling.
-
 use rayon::prelude::*;
 
 /// Convert a YCbCr pixel to RGB, returns (R, G, B) clipped to [0, 255].
@@ -29,35 +28,52 @@ pub fn ycbcr_to_rgb(y_plane: &[f64], cb_plane: &[f64], cr_plane: &[f64], len: us
 /// Bilinear upsampling of a chroma plane (Hc, Wc) to (H, W).
 /// Reproduces exactly scipy.ndimage.zoom(channel, (fy, fx), order=1).
 /// scipy mapping: in_coord = out_coord * (in_size - 1) / (out_size - 1)
-pub fn upsample_420(channel: &[f64], hc: usize, wc: usize, target_h: usize, target_w: usize) -> Vec<f64> {
+pub fn upsample_420(
+    channel: &[f64],
+    hc: usize,
+    wc: usize,
+    target_h: usize,
+    target_w: usize,
+) -> Vec<f64> {
     let mut result = vec![0.0f64; target_h * target_w];
 
-    let scale_y = if target_h > 1 { (hc as f64 - 1.0) / (target_h as f64 - 1.0) } else { 0.0 };
-    let scale_x = if target_w > 1 { (wc as f64 - 1.0) / (target_w as f64 - 1.0) } else { 0.0 };
+    let scale_y = if target_h > 1 {
+        (hc as f64 - 1.0) / (target_h as f64 - 1.0)
+    } else {
+        0.0
+    };
+    let scale_x = if target_w > 1 {
+        (wc as f64 - 1.0) / (target_w as f64 - 1.0)
+    } else {
+        0.0
+    };
 
-    result.par_chunks_mut(target_w).enumerate().for_each(|(y, row)| {
-        let sy = y as f64 * scale_y;
-        let iy0 = (sy as usize).min(hc - 1);
-        let iy1 = (iy0 + 1).min(hc - 1);
-        let dy = sy - iy0 as f64;
+    result
+        .par_chunks_mut(target_w)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let sy = y as f64 * scale_y;
+            let iy0 = (sy as usize).min(hc - 1);
+            let iy1 = (iy0 + 1).min(hc - 1);
+            let dy = sy - iy0 as f64;
 
-        for x in 0..target_w {
-            let sx = x as f64 * scale_x;
-            let ix0 = (sx as usize).min(wc - 1);
-            let ix1 = (ix0 + 1).min(wc - 1);
-            let dx = sx - ix0 as f64;
+            for x in 0..target_w {
+                let sx = x as f64 * scale_x;
+                let ix0 = (sx as usize).min(wc - 1);
+                let ix1 = (ix0 + 1).min(wc - 1);
+                let dx = sx - ix0 as f64;
 
-            let v00 = channel[iy0 * wc + ix0];
-            let v01 = channel[iy0 * wc + ix1];
-            let v10 = channel[iy1 * wc + ix0];
-            let v11 = channel[iy1 * wc + ix1];
+                let v00 = channel[iy0 * wc + ix0];
+                let v01 = channel[iy0 * wc + ix1];
+                let v10 = channel[iy1 * wc + ix0];
+                let v11 = channel[iy1 * wc + ix1];
 
-            row[x] = v00 * (1.0 - dy) * (1.0 - dx)
-                   + v01 * (1.0 - dy) * dx
-                   + v10 * dy * (1.0 - dx)
-                   + v11 * dy * dx;
-        }
-    });
+                row[x] = v00 * (1.0 - dy) * (1.0 - dx)
+                    + v01 * (1.0 - dy) * dx
+                    + v10 * dy * (1.0 - dx)
+                    + v11 * dy * dx;
+            }
+        });
 
     result
 }
@@ -91,7 +107,12 @@ pub fn rgb_to_ycbcr_planes(rgb: &[u8], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64
 }
 
 /// RGB (separate f64 planes) -> YCbCr BT.601 conversion. Returns 3 planes (Y, Cb, Cr).
-pub fn rgb_to_ycbcr_from_f64(r: &[f64], g: &[f64], b: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+pub fn rgb_to_ycbcr_from_f64(
+    r: &[f64],
+    g: &[f64],
+    b: &[f64],
+    n: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut y = Vec::with_capacity(n);
     let mut cb = Vec::with_capacity(n);
     let mut cr = Vec::with_capacity(n);
@@ -142,8 +163,25 @@ pub fn subsample_420_encode(channel: &[f64], h: usize, w: usize) -> (Vec<f64>, u
 /// Properties: luma/chroma decorrelation, gray -> (L, 0, 0),
 /// the inverse uses only phi^-1 and phi^-2 (Fibonacci sequence).
 pub fn golden_rotate_forward(rgb: &[u8], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    rotate_forward_with_luma_blend(rgb, n, 0.0)
+}
+
+/// Invertible interpolation between the golden luminance axis and BT.601 Y.
+/// `blend=0` is the historical GCT bit-exactly; `blend=1` makes the first
+/// channel equal to Y = 0.299R + 0.587G + 0.114B.
+pub fn rotate_forward_with_luma_blend(
+    rgb: &[u8],
+    n: usize,
+    blend: f64,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     use crate::golden::{PHI, PHI_INV};
-    let norm = 1.0 / (2.0 * PHI);
+    let blend = blend.clamp(0.0, 1.0);
+    let golden_r = 1.0 / (2.0 * PHI);
+    let golden_g = 0.5;
+    let golden_b = PHI_INV / (2.0 * PHI);
+    let weight_r = golden_r * (1.0 - blend) + 0.299 * blend;
+    let weight_g = golden_g * (1.0 - blend) + 0.587 * blend;
+    let weight_b = golden_b * (1.0 - blend) + 0.114 * blend;
 
     let mut l = vec![0.0f64; n];
     let mut c1 = vec![0.0f64; n];
@@ -161,7 +199,7 @@ pub fn golden_rotate_forward(rgb: &[u8], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f
                 let r = rgb[i * 3] as f64;
                 let g = rgb[i * 3 + 1] as f64;
                 let b = rgb[i * 3 + 2] as f64;
-                let lum = (r + PHI * g + PHI_INV * b) * norm;
+                let lum = weight_r * r + weight_g * g + weight_b * b;
                 l_chunk[j] = lum;
                 c1_chunk[j] = b - lum;
                 c2_chunk[j] = r - lum;
@@ -172,8 +210,33 @@ pub fn golden_rotate_forward(rgb: &[u8], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f
 }
 
 /// Inverse of GCT: (L_phi, C1, C2) -> (R, G, B) as f64.
-pub fn golden_rotate_inverse(l: &[f64], c1: &[f64], c2: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    use crate::golden::{PHI_INV, PHI_INV2};
+pub fn golden_rotate_inverse(
+    l: &[f64],
+    c1: &[f64],
+    c2: &[f64],
+    n: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    rotate_inverse_with_luma_blend(l, c1, c2, n, 0.0)
+}
+
+/// Inverse of `rotate_forward_with_luma_blend`.
+pub fn rotate_inverse_with_luma_blend(
+    l: &[f64],
+    c1: &[f64],
+    c2: &[f64],
+    n: usize,
+    blend: f64,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    use crate::golden::{PHI, PHI_INV};
+    let blend = blend.clamp(0.0, 1.0);
+    let golden_r = 1.0 / (2.0 * PHI);
+    let golden_g = 0.5;
+    let golden_b = PHI_INV / (2.0 * PHI);
+    let weight_r = golden_r * (1.0 - blend) + 0.299 * blend;
+    let weight_g = golden_g * (1.0 - blend) + 0.587 * blend;
+    let weight_b = golden_b * (1.0 - blend) + 0.114 * blend;
+    let c1_to_g = weight_b / weight_g;
+    let c2_to_g = weight_r / weight_g;
 
     let mut r = vec![0.0f64; n];
     let mut g = vec![0.0f64; n];
@@ -189,7 +252,7 @@ pub fn golden_rotate_inverse(l: &[f64], c1: &[f64], c2: &[f64], n: usize) -> (Ve
             for j in 0..r_chunk.len() {
                 let i = start + j;
                 r_chunk[j] = l[i] + c2[i];
-                g_chunk[j] = l[i] - PHI_INV2 * c1[i] - PHI_INV * c2[i];
+                g_chunk[j] = l[i] - c1_to_g * c1[i] - c2_to_g * c2[i];
                 b_chunk[j] = l[i] + c1[i];
             }
         });
@@ -221,7 +284,11 @@ pub fn subsample_422_encode(channel: &[f64], h: usize, w: usize) -> (Vec<f64>, u
 /// Bilinear upsample from 4:2:2 (h, wc) to (h, w) — horizontal only.
 pub fn upsample_422(channel: &[f64], h: usize, wc: usize, target_w: usize) -> Vec<f64> {
     let mut result = vec![0.0f64; h * target_w];
-    let scale_x = if target_w > 1 { (wc as f64 - 1.0) / (target_w as f64 - 1.0) } else { 0.0 };
+    let scale_x = if target_w > 1 {
+        (wc as f64 - 1.0) / (target_w as f64 - 1.0)
+    } else {
+        0.0
+    };
 
     for y in 0..h {
         for x in 0..target_w {
@@ -287,7 +354,9 @@ pub fn phi_chroma_factor(s_norm: f64) -> f64 {
 pub fn perceptual_dz_map(luma: &[f64], h: usize, w: usize, base_dz: f64) -> Vec<f64> {
     use crate::golden::PHI_INV;
     let n = h * w;
-    if n == 0 { return vec![]; }
+    if n == 0 {
+        return vec![];
+    }
 
     // Robust luminance range
     let mut sorted: Vec<f64> = luma.iter().copied().collect();
@@ -303,10 +372,14 @@ pub fn perceptual_dz_map(luma: &[f64], h: usize, w: usize, base_dz: f64) -> Vec<
         for x in 0..w {
             let gy = if y + 1 < h {
                 (luma[(y + 1) * w + x] - luma[y * w + x]).abs()
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             let gx = if x + 1 < w {
                 (luma[y * w + x + 1] - luma[y * w + x]).abs()
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             grad[y * w + x] = gy.max(gx);
         }
     }
@@ -315,17 +388,19 @@ pub fn perceptual_dz_map(luma: &[f64], h: usize, w: usize, base_dz: f64) -> Vec<
     g_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     let g_95 = g_sorted[((n as f64 * 0.95) as usize).min(n.saturating_sub(1))].max(1.0);
 
-    (0..n).map(|i| {
-        let l_norm = ((luma[i] - l_min) / (l_max - l_min)).clamp(0.0, 1.0);
-        let cos_val = (std::f64::consts::PI * l_norm).cos();
-        let sensitivity = cos_val * cos_val;
+    (0..n)
+        .map(|i| {
+            let l_norm = ((luma[i] - l_min) / (l_max - l_min)).clamp(0.0, 1.0);
+            let cos_val = (std::f64::consts::PI * l_norm).cos();
+            let sensitivity = cos_val * cos_val;
 
-        let texture_norm = (grad[i] / g_95).clamp(0.0, 1.0);
+            let texture_norm = (grad[i] / g_95).clamp(0.0, 1.0);
 
-        // At edges (texture=1): reduce dz (preserve detail)
-        // At flats (texture=0): keep dz at base (kill noise)
-        base_dz * (1.0 - PHI_INV * sensitivity * texture_norm)
-    }).collect()
+            // At edges (texture=1): reduce dz (preserve detail)
+            // At flats (texture=0): keep dz at base (kill noise)
+            base_dz * (1.0 - PHI_INV * sensitivity * texture_norm)
+        })
+        .collect()
 }
 
 /// v9 compensatory dead zone: mid-tones get wider dead zone to offset
@@ -337,7 +412,9 @@ pub fn perceptual_dz_map(luma: &[f64], h: usize, w: usize, base_dz: f64) -> Vec<
 pub fn perceptual_dz_map_v9(luma: &[f64], h: usize, w: usize, base_dz: f64) -> Vec<f64> {
     use crate::golden::PHI_INV;
     let n = h * w;
-    if n == 0 { return vec![]; }
+    if n == 0 {
+        return vec![];
+    }
 
     // Robust luminance range
     let mut sorted: Vec<f64> = luma.iter().copied().collect();
@@ -358,8 +435,16 @@ pub fn perceptual_dz_map_v9(luma: &[f64], h: usize, w: usize, base_dz: f64) -> V
     let mut grad = vec![0.0f64; n];
     for y in 0..h {
         for x in 0..w {
-            let gy = if y + 1 < h { (luma[(y + 1) * w + x] - luma[y * w + x]).abs() } else { 0.0 };
-            let gx = if x + 1 < w { (luma[y * w + x + 1] - luma[y * w + x]).abs() } else { 0.0 };
+            let gy = if y + 1 < h {
+                (luma[(y + 1) * w + x] - luma[y * w + x]).abs()
+            } else {
+                0.0
+            };
+            let gx = if x + 1 < w {
+                (luma[y * w + x + 1] - luma[y * w + x]).abs()
+            } else {
+                0.0
+            };
             grad[y * w + x] = gy.max(gx);
         }
     }
@@ -368,45 +453,62 @@ pub fn perceptual_dz_map_v9(luma: &[f64], h: usize, w: usize, base_dz: f64) -> V
     g_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     let g_95 = g_sorted[((n as f64 * 0.95) as usize).min(n.saturating_sub(1))].max(1.0);
 
-    (0..n).map(|i| {
-        let l_norm = ((luma[i] - l_min) / (l_max - l_min)).clamp(0.0, 1.0);
-        let cos_val = (std::f64::consts::PI * l_norm).cos();
-        let sensitivity = cos_val * cos_val;
-        let texture_norm = (grad[i] / g_95).clamp(0.0, 1.0);
+    (0..n)
+        .map(|i| {
+            let l_norm = ((luma[i] - l_min) / (l_max - l_min)).clamp(0.0, 1.0);
+            let cos_val = (std::f64::consts::PI * l_norm).cos();
+            let sensitivity = cos_val * cos_val;
+            let texture_norm = (grad[i] / g_95).clamp(0.0, 1.0);
 
-        // Compensator: sin^2 peaks at mid-tone (l_norm=0.5), zero at extremes
-        let sin_val = (std::f64::consts::PI * l_norm).sin();
-        let compensator = 1.0 + 0.5 * sin_val * sin_val;
+            // Compensator: sin^2 peaks at mid-tone (l_norm=0.5), zero at extremes
+            let sin_val = (std::f64::consts::PI * l_norm).sin();
+            let compensator = 1.0 + 0.5 * sin_val * sin_val;
 
-        base_dz * compensator * (1.0 - PHI_INV * sensitivity * texture_norm)
-    }).collect()
+            base_dz * compensator * (1.0 - PHI_INV * sensitivity * texture_norm)
+        })
+        .collect()
 }
 
 /// Bilinear downsample from (src_h, src_w) to (dst_h, dst_w).
 /// Same mapping as upsample_420: in = out * (in_size-1)/(out_size-1).
 pub fn downsample_2d(
-    data: &[f64], src_h: usize, src_w: usize, dst_h: usize, dst_w: usize,
+    data: &[f64],
+    src_h: usize,
+    src_w: usize,
+    dst_h: usize,
+    dst_w: usize,
 ) -> Vec<f64> {
     let mut result = vec![0.0f64; dst_h * dst_w];
-    let scale_y = if dst_h > 1 { (src_h as f64 - 1.0) / (dst_h as f64 - 1.0) } else { 0.0 };
-    let scale_x = if dst_w > 1 { (src_w as f64 - 1.0) / (dst_w as f64 - 1.0) } else { 0.0 };
+    let scale_y = if dst_h > 1 {
+        (src_h as f64 - 1.0) / (dst_h as f64 - 1.0)
+    } else {
+        0.0
+    };
+    let scale_x = if dst_w > 1 {
+        (src_w as f64 - 1.0) / (dst_w as f64 - 1.0)
+    } else {
+        0.0
+    };
 
-    result.par_chunks_mut(dst_w).enumerate().for_each(|(y, row)| {
-        let sy = y as f64 * scale_y;
-        let iy0 = (sy as usize).min(src_h.saturating_sub(1));
-        let iy1 = (iy0 + 1).min(src_h.saturating_sub(1));
-        let dy = sy - iy0 as f64;
-        for x in 0..dst_w {
-            let sx = x as f64 * scale_x;
-            let ix0 = (sx as usize).min(src_w.saturating_sub(1));
-            let ix1 = (ix0 + 1).min(src_w.saturating_sub(1));
-            let dx = sx - ix0 as f64;
-            row[x] = data[iy0 * src_w + ix0] * (1.0 - dy) * (1.0 - dx)
-                   + data[iy0 * src_w + ix1] * (1.0 - dy) * dx
-                   + data[iy1 * src_w + ix0] * dy * (1.0 - dx)
-                   + data[iy1 * src_w + ix1] * dy * dx;
-        }
-    });
+    result
+        .par_chunks_mut(dst_w)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let sy = y as f64 * scale_y;
+            let iy0 = (sy as usize).min(src_h.saturating_sub(1));
+            let iy1 = (iy0 + 1).min(src_h.saturating_sub(1));
+            let dy = sy - iy0 as f64;
+            for x in 0..dst_w {
+                let sx = x as f64 * scale_x;
+                let ix0 = (sx as usize).min(src_w.saturating_sub(1));
+                let ix1 = (ix0 + 1).min(src_w.saturating_sub(1));
+                let dx = sx - ix0 as f64;
+                row[x] = data[iy0 * src_w + ix0] * (1.0 - dy) * (1.0 - dx)
+                    + data[iy0 * src_w + ix1] * (1.0 - dy) * dx
+                    + data[iy1 * src_w + ix0] * dy * (1.0 - dx)
+                    + data[iy1 * src_w + ix1] * dy * dx;
+            }
+        });
     result
 }
 
@@ -422,8 +524,10 @@ pub fn encode_chroma_residual(
     original: &[f64],     // full-res channel (H x W)
     subsampled: &[f64],   // 4:2:0 channel (Hc x Wc)
     sat_map_full: &[f64], // saturation S_norm at full resolution (H x W)
-    h: usize, w: usize,
-    hc: usize, wc: usize,
+    h: usize,
+    w: usize,
+    hc: usize,
+    wc: usize,
     quant_step: f64,
 ) -> (Vec<u8>, Vec<i8>) {
     use crate::golden::PHI_INV;
@@ -433,7 +537,9 @@ pub fn encode_chroma_residual(
     let upsampled = upsample_420(subsampled, hc, wc, h, w);
 
     // Residual = original - upsampled
-    let residual: Vec<f64> = original.iter().zip(&upsampled)
+    let residual: Vec<f64> = original
+        .iter()
+        .zip(&upsampled)
         .map(|(&o, &u)| o - u)
         .collect();
 
@@ -485,10 +591,11 @@ pub fn encode_chroma_residual(
 /// Decode the chroma residual and add it to the upsampled chroma.
 /// Modifies chroma_full in-place.
 pub fn decode_chroma_residual(
-    chroma_full: &mut [f64],  // upsampled chroma (H x W), modified in-place
+    chroma_full: &mut [f64], // upsampled chroma (H x W), modified in-place
     block_mask: &[u8],
     residuals: &[i8],
-    h: usize, w: usize,
+    h: usize,
+    w: usize,
     quant_step: f64,
 ) {
     const BLOCK: usize = 8;
@@ -532,10 +639,16 @@ mod tests {
         assert!((f0 - 1.0).abs() < 1e-10, "f(0) should be 1.0, got {}", f0);
         // phi_chroma_factor(1.0) = PHI_INV2 = 0.382 (fully saturated → finest chroma quant)
         let f1 = phi_chroma_factor(1.0);
-        assert!((f1 - PHI_INV2).abs() < 1e-10, "f(1) should be phi^-2, got {}", f1);
+        assert!(
+            (f1 - PHI_INV2).abs() < 1e-10,
+            "f(1) should be phi^-2, got {}",
+            f1
+        );
         // Monotone decreasing
         for i in 0..100 {
-            assert!(phi_chroma_factor(i as f64 / 100.0) >= phi_chroma_factor((i + 1) as f64 / 100.0));
+            assert!(
+                phi_chroma_factor(i as f64 / 100.0) >= phi_chroma_factor((i + 1) as f64 / 100.0)
+            );
         }
     }
 
@@ -544,7 +657,9 @@ mod tests {
         let c1 = vec![0.1, 0.2, 0.0, 0.1];
         let c2 = vec![0.0, 0.1, 0.1, 0.0];
         let sat = saturation_map(&c1, &c2, 2, 2);
-        for &s in &sat { assert!(s < 0.3); }
+        for &s in &sat {
+            assert!(s < 0.3);
+        }
     }
 
     #[test]
@@ -577,9 +692,47 @@ mod tests {
             let ro = rgb[i * 3] as f64;
             let go = rgb[i * 3 + 1] as f64;
             let bo = rgb[i * 3 + 2] as f64;
-            assert!((r[i] - ro).abs() < 1e-10, "R mismatch at {}: {} vs {}", i, r[i], ro);
-            assert!((g[i] - go).abs() < 1e-10, "G mismatch at {}: {} vs {}", i, g[i], go);
-            assert!((b[i] - bo).abs() < 1e-10, "B mismatch at {}: {} vs {}", i, b[i], bo);
+            assert!(
+                (r[i] - ro).abs() < 1e-10,
+                "R mismatch at {}: {} vs {}",
+                i,
+                r[i],
+                ro
+            );
+            assert!(
+                (g[i] - go).abs() < 1e-10,
+                "G mismatch at {}: {} vs {}",
+                i,
+                g[i],
+                go
+            );
+            assert!(
+                (b[i] - bo).abs() < 1e-10,
+                "B mismatch at {}: {} vs {}",
+                i,
+                b[i],
+                bo
+            );
+        }
+    }
+
+    #[test]
+    fn test_bt601_luma_basis_is_exact_and_invertible() {
+        let rgb: Vec<u8> = vec![200, 100, 50, 13, 220, 91, 255, 255, 255, 0, 0, 0];
+        let n = rgb.len() / 3;
+        let (l, c1, c2) = rotate_forward_with_luma_blend(&rgb, n, 1.0);
+        for i in 0..n {
+            let r = rgb[i * 3] as f64;
+            let g = rgb[i * 3 + 1] as f64;
+            let b = rgb[i * 3 + 2] as f64;
+            let expected_y = 0.299 * r + 0.587 * g + 0.114 * b;
+            assert!((l[i] - expected_y).abs() < 1e-10);
+        }
+        let (r, g, b) = rotate_inverse_with_luma_blend(&l, &c1, &c2, n, 1.0);
+        for i in 0..n {
+            assert!((r[i] - rgb[i * 3] as f64).abs() < 1e-10);
+            assert!((g[i] - rgb[i * 3 + 1] as f64).abs() < 1e-10);
+            assert!((b[i] - rgb[i * 3 + 2] as f64).abs() < 1e-10);
         }
     }
 
@@ -599,7 +752,11 @@ mod tests {
         let dz = perceptual_dz_map_v9(&luma, 8, 8, 0.15);
         let avg: f64 = dz.iter().sum::<f64>() / dz.len() as f64;
         // Mid-tone flat: compensator=1.5, sensitivity=0, so dz = 0.15 * 1.5 = 0.225
-        assert!(avg > 0.20 && avg < 0.25, "mid-tone dz should be ~0.225, got {}", avg);
+        assert!(
+            avg > 0.20 && avg < 0.25,
+            "mid-tone dz should be ~0.225, got {}",
+            avg
+        );
     }
 
     #[test]
@@ -607,6 +764,10 @@ mod tests {
         let luma = vec![10.0; 64]; // 8x8 flat dark
         let dz = perceptual_dz_map_v9(&luma, 8, 8, 0.15);
         let avg: f64 = dz.iter().sum::<f64>() / dz.len() as f64;
-        assert!(avg > 0.12 && avg < 0.18, "dark dz should be ~0.15, got {}", avg);
+        assert!(
+            avg > 0.12 && avg < 0.18,
+            "dark dz should be ~0.15, got {}",
+            avg
+        );
     }
 }

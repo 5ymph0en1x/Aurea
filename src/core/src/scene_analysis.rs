@@ -1,7 +1,6 @@
 /// Scene analysis from geometric primitives.
 /// The supercordes (segments + arcs) extracted by the encoder are a structural
 /// radiograph of the image. Their statistics reveal the geometric nature of the scene.
-
 use crate::geometric::Primitive;
 use std::f64::consts::PI;
 
@@ -10,8 +9,8 @@ use std::f64::consts::PI;
 #[derive(Debug)]
 pub struct DcSceneProfile {
     pub scene_type: SceneType,
-    pub smooth_pct: f64,    // % of DC grid that is "smooth" (low gradient)
-    pub anisotropy: f64,    // orientation anisotropy of DC gradients
+    pub smooth_pct: f64,      // % of DC grid that is "smooth" (low gradient)
+    pub anisotropy: f64,      // orientation anisotropy of DC gradients
     pub velvet_strength: f64, // recommended velvet filter strength [0..2]
 }
 
@@ -21,8 +20,10 @@ pub fn analyze_dc_grid(dc: &[f64], gh: usize, gw: usize) -> DcSceneProfile {
     let n = gh * gw;
     if n < 4 {
         return DcSceneProfile {
-            scene_type: SceneType::Flat, smooth_pct: 100.0,
-            anisotropy: 0.0, velvet_strength: 1.0,
+            scene_type: SceneType::Flat,
+            smooth_pct: 100.0,
+            anisotropy: 0.0,
+            velvet_strength: 1.0,
         };
     }
 
@@ -33,8 +34,16 @@ pub fn analyze_dc_grid(dc: &[f64], gh: usize, gw: usize) -> DcSceneProfile {
 
     for y in 0..gh {
         for x in 0..gw {
-            let gx = if x + 1 < gw { dc[y * gw + x + 1] - dc[y * gw + x] } else { 0.0 };
-            let gy = if y + 1 < gh { dc[(y + 1) * gw + x] - dc[y * gw + x] } else { 0.0 };
+            let gx = if x + 1 < gw {
+                dc[y * gw + x + 1] - dc[y * gw + x]
+            } else {
+                0.0
+            };
+            let gy = if y + 1 < gh {
+                dc[(y + 1) * gw + x] - dc[y * gw + x]
+            } else {
+                0.0
+            };
             grad_h[y * gw + x] = gx;
             grad_v[y * gw + x] = gy;
             mag[y * gw + x] = (gx * gx + gy * gy).sqrt();
@@ -48,17 +57,24 @@ pub fn analyze_dc_grid(dc: &[f64], gh: usize, gw: usize) -> DcSceneProfile {
     // Orientation histogram (4 bins: H, diag1, V, diag2)
     let mut hist = [0.0f64; 4];
     for i in 0..n {
-        if mag[i] < 1.0 { continue; } // skip flat areas
+        if mag[i] < 1.0 {
+            continue;
+        } // skip flat areas
         let angle = grad_v[i].atan2(grad_h[i]).rem_euclid(PI);
         let bin = ((angle / PI * 4.0) as usize).min(3);
         hist[bin] += mag[i];
     }
     let hist_sum: f64 = hist.iter().sum();
-    if hist_sum > 0.0 { for v in hist.iter_mut() { *v /= hist_sum; } }
+    if hist_sum > 0.0 {
+        for v in hist.iter_mut() {
+            *v /= hist_sum;
+        }
+    }
 
     // Anisotropy
     let max_entropy = (4.0f64).ln();
-    let entropy: f64 = hist.iter()
+    let entropy: f64 = hist
+        .iter()
         .filter(|&&v| v > 0.0)
         .map(|&v| -v * v.ln())
         .sum();
@@ -93,7 +109,10 @@ pub fn analyze_dc_grid(dc: &[f64], gh: usize, gw: usize) -> DcSceneProfile {
     };
 
     DcSceneProfile {
-        scene_type, smooth_pct, anisotropy, velvet_strength,
+        scene_type,
+        smooth_pct,
+        anisotropy,
+        velvet_strength,
     }
 }
 
@@ -142,12 +161,16 @@ pub fn analyze_primitives(primitives: &[Primitive], img_h: usize, img_w: usize) 
     let n = primitives.len();
     if n == 0 {
         return SceneProfile {
-            n_primitives: 0, n_segments: 0, n_arcs: 0,
+            n_primitives: 0,
+            n_segments: 0,
+            n_arcs: 0,
             segment_arc_ratio: 1.0,
             orientation_histogram: [0.0; 8],
-            anisotropy: 0.0, dominant_angle: 0.0,
+            anisotropy: 0.0,
+            dominant_angle: 0.0,
             perspective_score: 0.0,
-            avg_length: 0.0, density: 0.0,
+            avg_length: 0.0,
+            density: 0.0,
             scene_type: SceneType::Flat,
         };
     }
@@ -194,19 +217,23 @@ pub fn analyze_primitives(primitives: &[Primitive], img_h: usize, img_w: usize) 
     // Normalize orientation histogram
     let hist_sum: f64 = orientation_hist.iter().sum();
     if hist_sum > 0.0 {
-        for v in orientation_hist.iter_mut() { *v /= hist_sum; }
+        for v in orientation_hist.iter_mut() {
+            *v /= hist_sum;
+        }
     }
 
     // Anisotropy: entropy-based. Uniform distribution = 0, single bin = 1.
     let max_entropy = (8.0f64).ln();
-    let entropy: f64 = orientation_hist.iter()
+    let entropy: f64 = orientation_hist
+        .iter()
         .filter(|&&v| v > 0.0)
         .map(|&v| -v * v.ln())
         .sum();
     let anisotropy = 1.0 - entropy / max_entropy;
 
     // Dominant angle
-    let dominant_bin = orientation_hist.iter()
+    let dominant_bin = orientation_hist
+        .iter()
         .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
         .map(|(i, _)| i)
@@ -242,12 +269,16 @@ pub fn analyze_primitives(primitives: &[Primitive], img_h: usize, img_w: usize) 
     };
 
     SceneProfile {
-        n_primitives: n, n_segments, n_arcs,
+        n_primitives: n,
+        n_segments,
+        n_arcs,
         segment_arc_ratio,
         orientation_histogram: orientation_hist,
-        anisotropy, dominant_angle,
+        anisotropy,
+        dominant_angle,
         perspective_score,
-        avg_length, density,
+        avg_length,
+        density,
         scene_type,
     }
 }
@@ -325,7 +356,7 @@ pub fn recommend_lot(profile: &DcSceneProfile) -> bool {
     // Even then, LOT with deblocking is usually competitive.
     match profile.scene_type {
         SceneType::Flat => profile.smooth_pct < 85.0, // very flat → CDF97 may be better
-        _ => true, // LOT for everything else
+        _ => true,                                    // LOT for everything else
     }
 }
 
@@ -333,11 +364,11 @@ pub fn recommend_lot(profile: &DcSceneProfile) -> bool {
 /// Returns (detail_step_factor, deblock_strength_hint).
 pub fn encoder_scene_adjust(profile: &DcSceneProfile) -> (f64, f64) {
     match profile.scene_type {
-        SceneType::Flat => (0.9, 1.5),          // flat: can quantize slightly finer, strong deblock
-        SceneType::Architectural => (1.0, 1.0),  // architectural: standard
-        SceneType::Perspective => (0.95, 0.9),    // perspective: slightly finer for lines
-        SceneType::Organic => (1.1, 0.5),         // organic: texture masks artifacts, save bits
-        SceneType::Mixed => (1.0, 0.8),           // mixed: balanced
+        SceneType::Flat => (0.9, 1.5), // flat: can quantize slightly finer, strong deblock
+        SceneType::Architectural => (1.0, 1.0), // architectural: standard
+        SceneType::Perspective => (0.95, 0.9), // perspective: slightly finer for lines
+        SceneType::Organic => (1.1, 0.5), // organic: texture masks artifacts, save bits
+        SceneType::Mixed => (1.0, 0.8), // mixed: balanced
     }
 }
 
@@ -355,8 +386,11 @@ pub struct PerceptualQuality {
 }
 
 pub fn compare_quality(
-    original: &[f64], decoded: &[f64],
-    h: usize, w: usize, block_size: usize,
+    original: &[f64],
+    decoded: &[f64],
+    h: usize,
+    w: usize,
+    block_size: usize,
 ) -> PerceptualQuality {
     let n = h * w;
     let mut mse = 0.0f64;
@@ -395,8 +429,11 @@ pub fn compare_quality(
         for y in 1..h - 1 {
             for x in 1..w - 1 {
                 let c = img[y * w + x];
-                let lap = img[(y - 1) * w + x] + img[(y + 1) * w + x]
-                        + img[y * w + x - 1] + img[y * w + x + 1] - 4.0 * c;
+                let lap = img[(y - 1) * w + x]
+                    + img[(y + 1) * w + x]
+                    + img[y * w + x - 1]
+                    + img[y * w + x + 1]
+                    - 4.0 * c;
                 let gx = (img[y * w + x + 1] - img[y * w + x - 1]).abs();
                 let gy = (img[(y + 1) * w + x] - img[(y - 1) * w + x]).abs();
                 g1 += gx + gy;
@@ -420,18 +457,25 @@ pub fn compare_quality(
         for x in 1..w {
             let step = (decoded[y * w + x] - decoded[y * w + x - 1]).abs();
             if x % block_size == 0 {
-                grid_step += step; grid_count += 1;
+                grid_step += step;
+                grid_count += 1;
             } else {
-                interior_step += step; interior_count += 1;
+                interior_step += step;
+                interior_count += 1;
             }
         }
     }
     let blocking_visibility = if interior_count > 0 && grid_count > 0 {
         (grid_step / grid_count as f64) / (interior_step / interior_count as f64).max(1e-10)
-    } else { 1.0 };
+    } else {
+        1.0
+    };
 
     PerceptualQuality {
-        psnr, mae, edge_preservation,
-        gradient_smoothness_ratio, blocking_visibility,
+        psnr,
+        mae,
+        edge_preservation,
+        gradient_smoothness_ratio,
+        blocking_visibility,
     }
 }

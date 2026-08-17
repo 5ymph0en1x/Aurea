@@ -1,7 +1,7 @@
-/// Trashland pipeline: encode through AUREA v12, decode, corrupt.
+/// Trashland pipeline: encode through AUREA v13, decode, corrupt.
 ///
 /// The corruption layers simulate satellite transmission failure:
-///   1. Encode the image with AUREA v12 at medium quality (lossy compression)
+///   1. Encode the image with AUREA v13 at medium quality (lossy compression)
 ///   2. Decode it back (this gives the "clean compressed" baseline)
 ///   3. Apply 5 progressive corruption layers based on signal strength
 
@@ -18,7 +18,7 @@ pub fn trashland_pipeline(
 ) -> Vec<u8> {
     let mut rng = Rng::new(seed);
 
-    // Step 1: Encode with AUREA v12 at quality proportional to signal
+    // Step 1: Encode with AUREA v13 at quality proportional to signal
     // Higher signal = higher quality base (less codec artifacts to start with)
     let encode_quality = (signal as u16 * 80 / 100 + 15).min(90) as u8;
     let params = aurea_core::aurea_encoder::AureaEncoderParams {
@@ -27,8 +27,8 @@ pub fn trashland_pipeline(
         geometric: false,
     };
 
-    let encoded = aurea_core::aurea_encoder::encode_aur2_v12(rgb, width, height, &params)
-        .expect("AUREA v12 encode failed");
+    let encoded = aurea_core::aurea_encoder::encode_aur2_v13(rgb, width, height, &params)
+        .expect("AUREA v13 encode failed");
 
     // Step 2: Decode back to RGB
     let decoded = aurea_core::decode_aurea(&encoded.aurea_data)

@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# AUREA v12 codec installation for Windows
+# AUREA v13 codec installation for Windows
 # - Removes any previous codec (XTS, Echo, old AUREA)
 # - Native thumbnails in Explorer
 # - File association (double-click)
@@ -20,7 +20,7 @@ $ContainerGuid = "{267A0E00-C0DE-4ABC-9DEF-000000267013}"
 $ThumbHandlerCatid = "{E357FCCD-A995-4576-B01F-234630154E96}"
 $WicDecoderCatid = "{7ED96837-96F0-4812-B211-F13C24117ED3}"
 
-Write-Host "=== AUREA v12 Installation for Windows ===" -ForegroundColor Cyan
+Write-Host "=== AUREA v13 Installation for Windows ===" -ForegroundColor Cyan
 Write-Host ""
 
 # ======================================================================
@@ -205,7 +205,7 @@ Set-ItemProperty -Path "HKLM:\SOFTWARE\Classes\.aur" -Name "Content Type" -Value
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Classes\.aur" -Name "PerceivedType" -Value "image"
 
 # File type description
-New-Item -Path "HKLM:\SOFTWARE\Classes\aurea.image" -Value "AUREA v12 Image" -Force | Out-Null
+New-Item -Path "HKLM:\SOFTWARE\Classes\aurea.image" -Value "AUREA v13 Image" -Force | Out-Null
 New-Item -Path "HKLM:\SOFTWARE\Classes\aurea.image\DefaultIcon" -Value "imageres.dll,67" -Force | Out-Null
 
 # Default open (aurea-viewer)
@@ -291,7 +291,7 @@ New-Item -Path "$WicClsidKey\InProcServer32" -Value $DllPath -Force | Out-Null
 Set-ItemProperty -Path "$WicClsidKey\InProcServer32" -Name "ThreadingModel" -Value "Both"
 
 Set-ItemProperty -Path $WicClsidKey -Name "Author" -Value "aurea"
-Set-ItemProperty -Path $WicClsidKey -Name "FriendlyName" -Value "AUREA v12 Image Decoder"
+Set-ItemProperty -Path $WicClsidKey -Name "FriendlyName" -Value "AUREA v13 Image Decoder"
 Set-ItemProperty -Path $WicClsidKey -Name "ContainerFormat" -Value $ContainerGuid
 Set-ItemProperty -Path $WicClsidKey -Name "FileExtensions" -Value ".aur"
 Set-ItemProperty -Path $WicClsidKey -Name "MimeTypes" -Value "image/x-aurea"
@@ -315,7 +315,7 @@ Set-ItemProperty -Path $Pat0 -Name "Mask" -Value ([byte[]]@(0xFF,0xFF,0xFF,0xFF)
 $WicCatKey = "HKLM:\SOFTWARE\Classes\CLSID\$WicDecoderCatid\Instance\$ClsidWic"
 New-Item -Path $WicCatKey -Force | Out-Null
 Set-ItemProperty -Path $WicCatKey -Name "CLSID" -Value $ClsidWic
-Set-ItemProperty -Path $WicCatKey -Name "FriendlyName" -Value "AUREA v12 Image Decoder"
+Set-ItemProperty -Path $WicCatKey -Name "FriendlyName" -Value "AUREA v13 Image Decoder"
 
 Write-Host "  OK" -ForegroundColor Green
 
@@ -330,9 +330,9 @@ Start-Process explorer
 Write-Host "  OK" -ForegroundColor Green
 
 Write-Host ""
-Write-Host "=== AUREA v12 installation complete ===" -ForegroundColor Cyan
+Write-Host "=== AUREA v13 installation complete ===" -ForegroundColor Cyan
 Write-Host ""
-Write-Host ".aur files (AUR2 v12 format) now have:"
+Write-Host ".aur files (AUR2 v13 format) now have:"
 Write-Host "  - Native thumbnails in Windows Explorer"
 Write-Host "  - Double-click to open with AUREA Viewer"
 Write-Host "  - 'image' type in file properties"

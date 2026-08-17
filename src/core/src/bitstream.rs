@@ -1,5 +1,4 @@
 /// Reading and writing of the XTS file format and internal x267 bitstream.
-
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Cursor, Read, Write};
 
@@ -17,10 +16,10 @@ pub struct X267Header {
     pub n_y: usize,
     pub n_cb: usize,
     pub n_cr: usize,
-    pub alpha_bits: u8,  // v3 only
+    pub alpha_bits: u8, // v3 only
     pub residu_bits: u8,
     pub res_max_abs: f32,
-    pub noise_sigma: f32,  // v5+
+    pub noise_sigma: f32, // v5+
 }
 
 /// Decoded bitstream data.
@@ -83,7 +82,10 @@ fn unpack_pred_residuals(cursor: &mut Cursor<&[u8]>, size: usize) -> io::Result<
 /// Parse a complete XTS file (magic + compressed payload).
 pub fn parse_xts(file_data: &[u8]) -> io::Result<X267Stream> {
     if file_data.len() < 4 || &file_data[0..4] != XTS_MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Not an XTS file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Not an XTS file",
+        ));
     }
 
     let stream = decompress_xts_payload(&file_data[4..])?;
@@ -130,11 +132,7 @@ pub fn parse_x267_stream(stream: &[u8]) -> io::Result<X267Stream> {
     let n_cr = cursor.read_u8()? as usize;
 
     // Alpha bits (v3 only)
-    let alpha_bits = if version == 3 {
-        cursor.read_u8()?
-    } else {
-        0
-    };
+    let alpha_bits = if version == 3 { cursor.read_u8()? } else { 0 };
 
     // Residual bits + max_abs
     let residu_bits = cursor.read_u8()?;
@@ -148,9 +146,18 @@ pub fn parse_x267_stream(stream: &[u8]) -> io::Result<X267Stream> {
     };
 
     let header = X267Header {
-        version, h, w, hc, wc,
-        n_y, n_cb, n_cr,
-        alpha_bits, residu_bits, res_max_abs, noise_sigma,
+        version,
+        h,
+        w,
+        hc,
+        wc,
+        n_y,
+        n_cb,
+        n_cr,
+        alpha_bits,
+        residu_bits,
+        res_max_abs,
+        noise_sigma,
     };
 
     // Centroids (uint8 -> f64)
@@ -238,12 +245,22 @@ pub fn pack_pred_residuals(residuals: &[i16]) -> Vec<u8> {
 /// Write the x267 v5 stream (uncompressed).
 #[allow(clippy::too_many_arguments)]
 pub fn write_x267_stream(
-    h: usize, w: usize, hc: usize, wc: usize,
-    n_y: usize, n_cb: usize, n_cr: usize,
-    residu_bits: u8, res_max_abs: f32,
+    h: usize,
+    w: usize,
+    hc: usize,
+    wc: usize,
+    n_y: usize,
+    n_cb: usize,
+    n_cr: usize,
+    residu_bits: u8,
+    res_max_abs: f32,
     noise_sigma: f32,
-    centroids_y: &[f64], centroids_cb: &[f64], centroids_cr: &[f64],
-    pred_y: &[i16], pred_cb: &[i16], pred_cr: &[i16],
+    centroids_y: &[f64],
+    centroids_cb: &[f64],
+    centroids_cr: &[f64],
+    pred_y: &[i16],
+    pred_cb: &[i16],
+    pred_cr: &[i16],
     y_pixel_res: Option<&[i8]>,
 ) -> Vec<u8> {
     let mut stream: Vec<u8> = Vec::new();
@@ -332,7 +349,7 @@ pub struct X267V6Header {
     pub ll_y_size: (usize, usize),
     pub ll_c_size: (usize, usize),
     pub ll_cr_size: (usize, usize), // if different from ll_c_size (AUREA v2 GCT)
-    pub steps_y: Vec<[f64; 3]>,  // per level: [LH, HL, HH]
+    pub steps_y: Vec<[f64; 3]>,     // per level: [LH, HL, HH]
     pub steps_c: Vec<[f64; 3]>,
     pub steps_cr: Vec<[f64; 3]>, // if different from steps_c (AUREA v2 GCT)
     pub flags: u8,
@@ -384,9 +401,16 @@ fn parse_x267_v6(_stream: &[u8]) -> io::Result<X267Stream> {
 
     let header = X267Header {
         version: 6,
-        h: 0, w: 0, hc: 0, wc: 0,
-        n_y: 0, n_cb: 0, n_cr: 0,
-        alpha_bits: 0, residu_bits: 0, res_max_abs: 0.0,
+        h: 0,
+        w: 0,
+        hc: 0,
+        wc: 0,
+        n_y: 0,
+        n_cb: 0,
+        n_cr: 0,
+        alpha_bits: 0,
+        residu_bits: 0,
+        res_max_abs: 0.0,
         noise_sigma: 0.0,
     };
 
@@ -482,11 +506,17 @@ pub fn parse_x267_v6_full(stream: &[u8]) -> io::Result<X267V6Stream> {
 
     // Centroids
     let mut centroids_y = Vec::with_capacity(n_y);
-    for _ in 0..n_y { centroids_y.push(lc.read_u8()? as f64); }
+    for _ in 0..n_y {
+        centroids_y.push(lc.read_u8()? as f64);
+    }
     let mut centroids_cb = Vec::with_capacity(n_cb);
-    for _ in 0..n_cb { centroids_cb.push(lc.read_u8()? as f64); }
+    for _ in 0..n_cb {
+        centroids_cb.push(lc.read_u8()? as f64);
+    }
     let mut centroids_cr = Vec::with_capacity(n_cr);
-    for _ in 0..n_cr { centroids_cr.push(lc.read_u8()? as f64); }
+    for _ in 0..n_cr {
+        centroids_cr.push(lc.read_u8()? as f64);
+    }
 
     // Paeth residuals
     let ll_pos = lc.position() as usize;
@@ -501,22 +531,36 @@ pub fn parse_x267_v6_full(stream: &[u8]) -> io::Result<X267V6Stream> {
     let detail_data = stream[det_start..].to_vec();
 
     let header = X267V6Header {
-        h, w, hc, wc, n_y, n_cb, n_cr,
-        noise_sigma, wv_levels, ll_ranges,
+        h,
+        w,
+        hc,
+        wc,
+        n_y,
+        n_cb,
+        n_cr,
+        noise_sigma,
+        wv_levels,
+        ll_ranges,
         cr_sizes: cb_sizes.clone(),
-        y_sizes, cb_sizes,
+        y_sizes,
+        cb_sizes,
         ll_y_size: (ll_yh, ll_yw),
         ll_c_size: (ll_ch, ll_cw),
         ll_cr_size: (ll_ch, ll_cw),
         steps_cr: steps_c.clone(),
-        steps_y, steps_c,
+        steps_y,
+        steps_c,
         flags,
     };
 
     Ok(X267V6Stream {
         header,
-        centroids_y, centroids_cb, centroids_cr,
-        pred_y, pred_cb, pred_cr,
+        centroids_y,
+        centroids_cb,
+        centroids_cr,
+        pred_y,
+        pred_cb,
+        pred_cr,
         detail_data,
         detail_offset: 0,
         band_size_prefixed: false,
@@ -534,15 +578,25 @@ pub fn parse_x267_v6_full(stream: &[u8]) -> io::Result<X267V6Stream> {
 /// Write the v6 stream (uncompressed).
 #[allow(clippy::too_many_arguments)]
 pub fn write_x267_v6_stream(
-    h: usize, w: usize, hc: usize, wc: usize,
-    n_y: usize, n_cb: usize, n_cr: usize,
-    noise_sigma: f32, wv_levels: usize, flags: u8,
+    h: usize,
+    w: usize,
+    hc: usize,
+    wc: usize,
+    n_y: usize,
+    n_cb: usize,
+    n_cr: usize,
+    noise_sigma: f32,
+    wv_levels: usize,
+    flags: u8,
     ll_ranges: &[(f32, f32); 3],
     y_sizes: &[(usize, usize)],
     cb_sizes: &[(usize, usize)],
-    ll_y_size: (usize, usize), ll_c_size: (usize, usize),
-    steps_y: &[[f64; 3]], steps_c: &[[f64; 3]],
-    ll_stream: &[u8], det_stream: &[u8],
+    ll_y_size: (usize, usize),
+    ll_c_size: (usize, usize),
+    steps_y: &[[f64; 3]],
+    steps_c: &[[f64; 3]],
+    ll_stream: &[u8],
+    det_stream: &[u8],
 ) -> Vec<u8> {
     let mut s: Vec<u8> = Vec::new();
 
@@ -604,7 +658,8 @@ pub fn write_x267_v6_stream(
 
     // LL + det sizes
     s.write_u32::<LittleEndian>(ll_stream.len() as u32).unwrap();
-    s.write_u32::<LittleEndian>(det_stream.len() as u32).unwrap();
+    s.write_u32::<LittleEndian>(det_stream.len() as u32)
+        .unwrap();
 
     // Data
     s.extend_from_slice(ll_stream);
@@ -623,13 +678,13 @@ pub const AUR2_MAGIC: &[u8; 4] = b"AUR2";
 /// AUR2 file header (v10 primitives-first pipeline).
 #[derive(Debug, Clone)]
 pub struct Aur2Header {
-    pub version: u8,       // 0 for now, reserved for future iterations
+    pub version: u8, // 0 for now, reserved for future iterations
     pub quality: u8,
     pub width: usize,
     pub height: usize,
     pub wv_levels: usize,
     pub detail_step: f64,
-    pub ll_ranges: [(f32, f32); 3],  // L, C1, C2 (min, max)
+    pub ll_ranges: [(f32, f32); 3], // L, C1, C2 (min, max)
 }
 
 /// Serialize an AUR2 header to bytes (39 bytes total).
@@ -641,7 +696,8 @@ pub fn write_aur2_header(header: &Aur2Header) -> Vec<u8> {
     buf.write_u16::<LittleEndian>(header.width as u16).unwrap();
     buf.write_u16::<LittleEndian>(header.height as u16).unwrap();
     buf.push(header.wv_levels as u8);
-    buf.write_f32::<LittleEndian>(header.detail_step as f32).unwrap();
+    buf.write_f32::<LittleEndian>(header.detail_step as f32)
+        .unwrap();
     for &(min, max) in &header.ll_ranges {
         buf.write_f32::<LittleEndian>(min).unwrap();
         buf.write_f32::<LittleEndian>(max).unwrap();
@@ -669,9 +725,18 @@ pub fn parse_aur2_header(data: &[u8]) -> io::Result<(Aur2Header, usize)> {
         r.0 = c.read_f32::<LittleEndian>()?;
         r.1 = c.read_f32::<LittleEndian>()?;
     }
-    Ok((Aur2Header {
-        version, quality, width, height, wv_levels, detail_step, ll_ranges,
-    }, 39))
+    Ok((
+        Aur2Header {
+            version,
+            quality,
+            width,
+            height,
+            wv_levels,
+            detail_step,
+            ll_ranges,
+        },
+        39,
+    ))
 }
 
 // ======================================================================
@@ -698,7 +763,10 @@ pub fn write_hex_header(hdr: &HexHeader) -> Vec<u8> {
 
 pub fn parse_hex_header(data: &[u8]) -> std::io::Result<HexHeader> {
     if data.len() < 6 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "hex header too short"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "hex header too short",
+        ));
     }
     Ok(HexHeader {
         hex_radius: data[0],
@@ -709,10 +777,10 @@ pub fn parse_hex_header(data: &[u8]) -> std::io::Result<HexHeader> {
 }
 
 // ======================================================================
-// AUR2 v12: Turing morphogenesis header extension
+// AUR2 v13: Turing morphogenesis header extension
 // ======================================================================
 
-/// v12 Turing parameters appended after flags when FLAG_BAYESIAN_HIERARCHY is set.
+/// v13 Turing parameters appended after flags when FLAG_BAYESIAN_HIERARCHY is set.
 #[derive(Debug, Clone)]
 pub struct TuringHeader {
     pub sigma_a: f32,
@@ -726,7 +794,7 @@ impl TuringHeader {
         Self {
             sigma_a: crate::calibration::TURING_SIGMA_A as f32,
             sigma_ratio: crate::calibration::TURING_SIGMA_RATIO as f32,
-            k_step: crate::calibration::TURING_K_STEP as f32,
+            k_step: *crate::calibration::TUNABLE_TURING_K_STEP as f32,
             mag_calibration: crate::calibration::TURING_MAG_CALIBRATION as f32,
         }
     }
@@ -747,12 +815,15 @@ impl TuringHeader {
                 "not enough data for TuringHeader",
             ));
         }
-        Ok((Self {
-            sigma_a: f32::from_le_bytes(data[0..4].try_into().unwrap()),
-            sigma_ratio: f32::from_le_bytes(data[4..8].try_into().unwrap()),
-            k_step: f32::from_le_bytes(data[8..12].try_into().unwrap()),
-            mag_calibration: f32::from_le_bytes(data[12..16].try_into().unwrap()),
-        }, 16))
+        Ok((
+            Self {
+                sigma_a: f32::from_le_bytes(data[0..4].try_into().unwrap()),
+                sigma_ratio: f32::from_le_bytes(data[4..8].try_into().unwrap()),
+                k_step: f32::from_le_bytes(data[8..12].try_into().unwrap()),
+                mag_calibration: f32::from_le_bytes(data[12..16].try_into().unwrap()),
+            },
+            16,
+        ))
     }
 }
 
@@ -791,13 +862,13 @@ mod aur2_tests {
 
     #[test]
     fn test_aur2_header_reject_bad_magic() {
-        let data = vec![0u8; 39];  // all zeros, not AUR2
+        let data = vec![0u8; 39]; // all zeros, not AUR2
         assert!(parse_aur2_header(&data).is_err());
     }
 
     #[test]
     fn test_aur2_header_reject_short() {
-        let data = b"AUR2".to_vec();  // only 4 bytes, need 39
+        let data = b"AUR2".to_vec(); // only 4 bytes, need 39
         assert!(parse_aur2_header(&data).is_err());
     }
 

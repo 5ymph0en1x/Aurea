@@ -1,7 +1,6 @@
 /// Signal processing: noise estimation, FFT Wiener denoising, directional sharpening.
-
 use rayon::prelude::*;
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{FftPlanner, num_complex::Complex};
 
 // ======================================================================
 // Utilities
@@ -155,12 +154,7 @@ pub fn estimate_noise_sigma(r: &[f64], g: &[f64], b: &[f64], h: usize, w: usize)
 // ======================================================================
 
 /// Cache-friendly block transpose.
-fn transpose_complex(
-    src: &[Complex<f64>],
-    dst: &mut [Complex<f64>],
-    rows: usize,
-    cols: usize,
-) {
+fn transpose_complex(src: &[Complex<f64>], dst: &mut [Complex<f64>], rows: usize, cols: usize) {
     const BLK: usize = 64;
     for yb in (0..rows).step_by(BLK) {
         let ye = rows.min(yb + BLK);
@@ -180,16 +174,14 @@ fn fft2(data: &mut [Complex<f64>], h: usize, w: usize) {
 
     // FFT each row (parallel)
     let fft_row = planner.plan_fft_forward(w);
-    data.par_chunks_mut(w)
-        .for_each(|row| fft_row.process(row));
+    data.par_chunks_mut(w).for_each(|row| fft_row.process(row));
 
     // Transpose -> FFT columns -> Transpose back
     let mut tr = vec![Complex::new(0.0, 0.0); h * w];
     transpose_complex(data, &mut tr, h, w);
 
     let fft_col = planner.plan_fft_forward(h);
-    tr.par_chunks_mut(h)
-        .for_each(|col| fft_col.process(col));
+    tr.par_chunks_mut(h).for_each(|col| fft_col.process(col));
 
     transpose_complex(&tr, data, w, h);
 }
@@ -198,15 +190,13 @@ fn ifft2(data: &mut [Complex<f64>], h: usize, w: usize) {
     let mut planner = FftPlanner::new();
 
     let ifft_row = planner.plan_fft_inverse(w);
-    data.par_chunks_mut(w)
-        .for_each(|row| ifft_row.process(row));
+    data.par_chunks_mut(w).for_each(|row| ifft_row.process(row));
 
     let mut tr = vec![Complex::new(0.0, 0.0); h * w];
     transpose_complex(data, &mut tr, h, w);
 
     let ifft_col = planner.plan_fft_inverse(h);
-    tr.par_chunks_mut(h)
-        .for_each(|col| ifft_col.process(col));
+    tr.par_chunks_mut(h).for_each(|col| ifft_col.process(col));
 
     transpose_complex(&tr, data, w, h);
 }
@@ -277,14 +267,13 @@ pub fn directional_sharpen(y: &mut [f64], h: usize, w: usize, strength: f64) {
 
     // 4 convolutions in parallel
     let ((grad_h, grad_v), (grad_d1, grad_d2)) = rayon::join(
-        || rayon::join(
-            || conv_3x3(y, h, w, &kern_h),
-            || conv_3x3(y, h, w, &kern_v),
-        ),
-        || rayon::join(
-            || conv_3x3(y, h, w, &kern_d1),
-            || conv_3x3(y, h, w, &kern_d2),
-        ),
+        || rayon::join(|| conv_3x3(y, h, w, &kern_h), || conv_3x3(y, h, w, &kern_v)),
+        || {
+            rayon::join(
+                || conv_3x3(y, h, w, &kern_d1),
+                || conv_3x3(y, h, w, &kern_d2),
+            )
+        },
     );
 
     let n = h * w;
@@ -319,11 +308,11 @@ pub enum Supercorde {
 /// Classify each block in the DC grid as Segment, Arc, or Rien.
 /// Uses DC gradient magnitude and directionality.
 /// Identical in encoder and decoder (pure DC grid computation).
-pub fn supercordes_classify(
-    dc_grid: &[f64], grid_h: usize, grid_w: usize,
-) -> Vec<Supercorde> {
+pub fn supercordes_classify(dc_grid: &[f64], grid_h: usize, grid_w: usize) -> Vec<Supercorde> {
     let n = grid_h * grid_w;
-    if n == 0 { return Vec::new(); }
+    if n == 0 {
+        return Vec::new();
+    }
 
     // Compute per-block gradient: dx, dy from DC neighbors
     let mut classes = vec![Supercorde::Rien; n];
@@ -335,10 +324,26 @@ pub fn supercordes_classify(
             let dc = dc_grid[idx];
 
             // Central differences (mirror at boundaries)
-            let left  = if gx > 0 { dc_grid[gy * grid_w + gx - 1] } else { dc };
-            let right = if gx + 1 < grid_w { dc_grid[gy * grid_w + gx + 1] } else { dc };
-            let top   = if gy > 0 { dc_grid[(gy - 1) * grid_w + gx] } else { dc };
-            let bot   = if gy + 1 < grid_h { dc_grid[(gy + 1) * grid_w + gx] } else { dc };
+            let left = if gx > 0 {
+                dc_grid[gy * grid_w + gx - 1]
+            } else {
+                dc
+            };
+            let right = if gx + 1 < grid_w {
+                dc_grid[gy * grid_w + gx + 1]
+            } else {
+                dc
+            };
+            let top = if gy > 0 {
+                dc_grid[(gy - 1) * grid_w + gx]
+            } else {
+                dc
+            };
+            let bot = if gy + 1 < grid_h {
+                dc_grid[(gy + 1) * grid_w + gx]
+            } else {
+                dc
+            };
 
             let dx = (right - left) * 0.5;
             let dy = (bot - top) * 0.5;
@@ -367,10 +372,26 @@ pub fn supercordes_classify(
             } else {
                 // Structural block: check directionality
                 let dc = dc_grid[idx];
-                let left  = if gx > 0 { dc_grid[gy * grid_w + gx - 1] } else { dc };
-                let right = if gx + 1 < grid_w { dc_grid[gy * grid_w + gx + 1] } else { dc };
-                let top   = if gy > 0 { dc_grid[(gy - 1) * grid_w + gx] } else { dc };
-                let bot   = if gy + 1 < grid_h { dc_grid[(gy + 1) * grid_w + gx] } else { dc };
+                let left = if gx > 0 {
+                    dc_grid[gy * grid_w + gx - 1]
+                } else {
+                    dc
+                };
+                let right = if gx + 1 < grid_w {
+                    dc_grid[gy * grid_w + gx + 1]
+                } else {
+                    dc
+                };
+                let top = if gy > 0 {
+                    dc_grid[(gy - 1) * grid_w + gx]
+                } else {
+                    dc
+                };
+                let bot = if gy + 1 < grid_h {
+                    dc_grid[(gy + 1) * grid_w + gx]
+                } else {
+                    dc
+                };
 
                 let dx = (right - left) * 0.5;
                 let dy = (bot - top) * 0.5;
@@ -402,12 +423,18 @@ pub fn supercordes_classify(
 ///
 /// Strength is gentle (phi^-2 ≈ 0.38) to avoid ringing.
 pub fn supercordes_sharpen(
-    plane: &mut [f64], h: usize, w: usize,
-    dc_grid: &[f64], grid_h: usize, grid_w: usize,
+    plane: &mut [f64],
+    h: usize,
+    w: usize,
+    dc_grid: &[f64],
+    grid_h: usize,
+    grid_w: usize,
     block_size: usize,
     strength: f64,
 ) {
-    if h < 3 || w < 3 || grid_h < 2 || grid_w < 2 { return; }
+    if h < 3 || w < 3 || grid_h < 2 || grid_w < 2 {
+        return;
+    }
 
     let classes = supercordes_classify(dc_grid, grid_h, grid_w);
 
@@ -418,9 +445,9 @@ pub fn supercordes_sharpen(
     let hi = h as i32;
     let wi = w as i32;
 
-    for y in 1..h-1 {
+    for y in 1..h - 1 {
         let gy = (y / block_size).min(grid_h - 1);
-        for x in 1..w-1 {
+        for x in 1..w - 1 {
             let gx = (x / block_size).min(grid_w - 1);
             let class = classes[gy * grid_w + gx];
 
@@ -516,16 +543,29 @@ pub fn schrodinger_collapse(plane: &[f64], h: usize, w: usize) -> Vec<u8> {
 /// as interference between quantized coefficients at different levels.
 pub fn ll_guided_deringing(
     plane: &mut [f64],
-    ll_decoded: &[f64], ll_h: usize, ll_w: usize,
-    h: usize, w: usize,
+    ll_decoded: &[f64],
+    ll_h: usize,
+    ll_w: usize,
+    h: usize,
+    w: usize,
     detail_step: f64,
 ) {
-    if h < 4 || w < 4 || ll_h == 0 || ll_w == 0 { return; }
+    if h < 4 || w < 4 || ll_h == 0 || ll_w == 0 {
+        return;
+    }
 
     // Upsample LL to full resolution (bilinear)
     let mut ll_full = vec![0.0f64; h * w];
-    let sy = if h > 1 { (ll_h as f64 - 1.0) / (h as f64 - 1.0) } else { 0.0 };
-    let sx = if w > 1 { (ll_w as f64 - 1.0) / (w as f64 - 1.0) } else { 0.0 };
+    let sy = if h > 1 {
+        (ll_h as f64 - 1.0) / (h as f64 - 1.0)
+    } else {
+        0.0
+    };
+    let sx = if w > 1 {
+        (ll_w as f64 - 1.0) / (w as f64 - 1.0)
+    } else {
+        0.0
+    };
     for i in 0..h {
         let fi = (i as f64 * sy).min((ll_h - 1) as f64);
         let i0 = fi as usize;
@@ -536,11 +576,10 @@ pub fn ll_guided_deringing(
             let j0 = fj as usize;
             let j1 = (j0 + 1).min(ll_w - 1);
             let dj = fj - j0 as f64;
-            ll_full[i * w + j] =
-                ll_decoded[i0 * ll_w + j0] * (1.0 - di) * (1.0 - dj)
-              + ll_decoded[i0 * ll_w + j1] * (1.0 - di) * dj
-              + ll_decoded[i1 * ll_w + j0] * di * (1.0 - dj)
-              + ll_decoded[i1 * ll_w + j1] * di * dj;
+            ll_full[i * w + j] = ll_decoded[i0 * ll_w + j0] * (1.0 - di) * (1.0 - dj)
+                + ll_decoded[i0 * ll_w + j1] * (1.0 - di) * dj
+                + ll_decoded[i1 * ll_w + j0] * di * (1.0 - dj)
+                + ll_decoded[i1 * ll_w + j1] * di * dj;
         }
     }
 
@@ -561,11 +600,11 @@ pub fn ll_guided_deringing(
 
     // LL gradient: edge detector at the LL scale
     let mut ll_edge = vec![0.0f64; h * w];
-    for i in 1..h-1 {
-        for j in 1..w-1 {
-            let gy = (ll_full[(i+1)*w+j] - ll_full[(i-1)*w+j]).abs();
-            let gx = (ll_full[i*w+j+1] - ll_full[i*w+j-1]).abs();
-            ll_edge[i*w+j] = gy.max(gx);
+    for i in 1..h - 1 {
+        for j in 1..w - 1 {
+            let gy = (ll_full[(i + 1) * w + j] - ll_full[(i - 1) * w + j]).abs();
+            let gx = (ll_full[i * w + j + 1] - ll_full[i * w + j - 1]).abs();
+            ll_edge[i * w + j] = gy.max(gx);
         }
     }
 
@@ -574,11 +613,15 @@ pub fn ll_guided_deringing(
             let idx = i * w + j;
 
             // Near LL edges: don't touch (real structure)
-            if ll_edge[idx] > detail_step * 0.4 { continue; }
+            if ll_edge[idx] > detail_step * 0.4 {
+                continue;
+            }
 
             // Oscillation = difference between reconstruction and blur
             let oscillation = (src[idx] - blurred[idx]).abs();
-            if oscillation < 0.5 { continue; } // no oscillation
+            if oscillation < 0.5 {
+                continue;
+            } // no oscillation
 
             // Blend strength: proportional to oscillation, bounded by step
             let max_osc = detail_step * 0.5;
@@ -599,7 +642,9 @@ pub fn ll_guided_deringing(
 /// Uses [1,2,1]/4 kernel to sew boundary pixels when artifact is detected.
 /// Works on any plane (L, C1, C2).
 pub fn deblock_lot_grid(plane: &mut [f64], h: usize, w: usize, block_size: usize) {
-    if h < block_size * 2 || w < block_size * 2 { return; }
+    if h < block_size * 2 || w < block_size * 2 {
+        return;
+    }
 
     let src = plane.to_vec();
 
@@ -607,20 +652,26 @@ pub fn deblock_lot_grid(plane: &mut [f64], h: usize, w: usize, block_size: usize
     for gx in 1..(w / block_size) {
         let bx = gx * block_size;
         for y in 0..h {
-            if bx < 2 || bx + 1 >= w { continue; }
+            if bx < 2 || bx + 1 >= w {
+                continue;
+            }
 
             // Step at boundary
             let p1 = src[y * w + bx - 1]; // left of boundary
-            let p2 = src[y * w + bx];     // right of boundary
+            let p2 = src[y * w + bx]; // right of boundary
             let boundary_step = (p2 - p1).abs();
 
             // Interior smoothness: compare with steps INSIDE each block
             let inner_left = if bx >= 2 {
                 (src[y * w + bx - 1] - src[y * w + bx - 2]).abs()
-            } else { boundary_step };
+            } else {
+                boundary_step
+            };
             let inner_right = if bx + 1 < w {
                 (src[y * w + bx + 1] - src[y * w + bx]).abs()
-            } else { boundary_step };
+            } else {
+                boundary_step
+            };
 
             // Artifact = boundary step is LARGER than interior steps
             // (real edge: interior steps are also large)
@@ -655,7 +706,7 @@ pub fn deblock_lot_grid(plane: &mut [f64], h: usize, w: usize, block_size: usize
                         let b = src[y * w + bx];
                         // Weighted blend: pull both sides toward the midpoint
                         plane[y * w + bx - 1] = (a * 3.0 + b) / 4.0;
-                        plane[y * w + bx]     = (a + b * 3.0) / 4.0;
+                        plane[y * w + bx] = (a + b * 3.0) / 4.0;
                     }
                     // Extended sewing: 2 pixels on each side
                     if bx >= 2 && bx + 2 < w {
@@ -675,7 +726,9 @@ pub fn deblock_lot_grid(plane: &mut [f64], h: usize, w: usize, block_size: usize
     for gy in 1..(h / block_size) {
         let by = gy * block_size;
         for x in 0..w {
-            if by < 2 || by + 1 >= h { continue; }
+            if by < 2 || by + 1 >= h {
+                continue;
+            }
 
             let p1 = src2[(by - 1) * w + x];
             let p2 = src2[by * w + x];
@@ -683,10 +736,14 @@ pub fn deblock_lot_grid(plane: &mut [f64], h: usize, w: usize, block_size: usize
 
             let inner_top = if by >= 2 {
                 (src2[(by - 1) * w + x] - src2[(by - 2) * w + x]).abs()
-            } else { boundary_step };
+            } else {
+                boundary_step
+            };
             let inner_bot = if by + 1 < h {
                 (src2[(by + 1) * w + x] - src2[by * w + x]).abs()
-            } else { boundary_step };
+            } else {
+                boundary_step
+            };
 
             let interior_max = inner_top.max(inner_bot);
             let is_gas = interior_max < 4.0;
@@ -715,7 +772,7 @@ pub fn deblock_lot_grid(plane: &mut [f64], h: usize, w: usize, block_size: usize
                         let a = src2[(by - 1) * w + x];
                         let b = src2[by * w + x];
                         plane[(by - 1) * w + x] = (a * 3.0 + b) / 4.0;
-                        plane[by * w + x]       = (a + b * 3.0) / 4.0;
+                        plane[by * w + x] = (a + b * 3.0) / 4.0;
                     }
                     if by >= 2 && by + 2 < h {
                         let a2 = src2[(by - 2) * w + x];
@@ -734,13 +791,17 @@ pub fn deblock_lot_grid(plane: &mut [f64], h: usize, w: usize, block_size: usize
 // Velvety Gas Filter (Spatial Domain 2D Smoothing)
 // ======================================================================
 
-/// Applies an intense edge-preserving 2D smooth to completely melt 
+/// Applies an intense edge-preserving 2D smooth to completely melt
 /// LOT macroblocks in the "gas" (smooth/sky) regions.
 pub fn velvet_gas_filter(plane: &mut [f64], h: usize, w: usize, block_size: usize, strength: f64) {
-    if h < 2 || w < 2 || strength < 0.01 { return; }
+    if h < 2 || w < 2 || strength < 0.01 {
+        return;
+    }
 
     // Scene-adaptive: strength scales radius and permissiveness
-    let radius = ((block_size as f64 / 2.0) * strength).round().clamp(2.0, block_size as f64) as usize;
+    let radius = ((block_size as f64 / 2.0) * strength)
+        .round()
+        .clamp(2.0, block_size as f64) as usize;
     let threshold = (3.0 / strength.max(0.1)).clamp(2.0, 10.0);
 
     let mut temp = vec![0.0; h * w];
@@ -756,17 +817,25 @@ pub fn velvet_gas_filter(plane: &mut [f64], h: usize, w: usize, block_size: usiz
 
                 // Right
                 for r in 1..=radius {
-                    if x + r >= w { break; }
+                    if x + r >= w {
+                        break;
+                    }
                     let val = plane[y * w + (x + r)];
-                    if (val - center_val).abs() > threshold { break; }
+                    if (val - center_val).abs() > threshold {
+                        break;
+                    }
                     sum += val;
                     weight += 1.0;
                 }
                 // Left
                 for r in 1..=radius {
-                    if x < r { break; }
+                    if x < r {
+                        break;
+                    }
                     let val = plane[y * w + (x - r)];
-                    if (val - center_val).abs() > threshold { break; }
+                    if (val - center_val).abs() > threshold {
+                        break;
+                    }
                     sum += val;
                     weight += 1.0;
                 }
@@ -783,17 +852,25 @@ pub fn velvet_gas_filter(plane: &mut [f64], h: usize, w: usize, block_size: usiz
 
                 // Down
                 for r in 1..=radius {
-                    if y + r >= h { break; }
+                    if y + r >= h {
+                        break;
+                    }
                     let val = temp[(y + r) * w + x];
-                    if (val - center_val).abs() > threshold { break; }
+                    if (val - center_val).abs() > threshold {
+                        break;
+                    }
                     sum += val;
                     weight += 1.0;
                 }
                 // Up
                 for r in 1..=radius {
-                    if y < r { break; }
+                    if y < r {
+                        break;
+                    }
                     let val = temp[(y - r) * w + x];
-                    if (val - center_val).abs() > threshold { break; }
+                    if (val - center_val).abs() > threshold {
+                        break;
+                    }
                     sum += val;
                     weight += 1.0;
                 }
@@ -811,8 +888,8 @@ pub fn velvet_gas_filter(plane: &mut [f64], h: usize, w: usize, block_size: usiz
 /// Only averages neighbors whose value is close (within +-sigma_t).
 /// Ringing oscillations are excluded because they exceed the threshold.
 pub fn anti_ring_sigma(plane: &mut [f64], h: usize, w: usize, step: f64) {
-    const EDGE_THRESH: f64 = 6.0;  // more sensitive edge detection
-    const PAD: usize = 3;          // wider window: CDF 9/7 sidelobes extend ~8px
+    const EDGE_THRESH: f64 = 6.0; // more sensitive edge detection
+    const PAD: usize = 3; // wider window: CDF 9/7 sidelobes extend ~8px
 
     if step < 2.0 || h < 7 || w < 7 {
         return;
@@ -822,10 +899,10 @@ pub fn anti_ring_sigma(plane: &mut [f64], h: usize, w: usize, step: f64) {
     let sigma_t = (step * 0.5).clamp(2.0, 12.0);
     let n = h * w;
 
-    // --- L-inf gradient ---
+    // --- L-inf gradient (parallel by row) ---
     let mut grad = vec![0.0f64; n];
-    for r in 0..h {
-        for c in 0..w {
+    grad.par_chunks_mut(w).enumerate().for_each(|(r, row)| {
+        for (c, g) in row.iter_mut().enumerate() {
             let idx = r * w + c;
             let gy = if r + 1 < h {
                 (plane[(r + 1) * w + c] - plane[idx]).abs()
@@ -837,32 +914,53 @@ pub fn anti_ring_sigma(plane: &mut [f64], h: usize, w: usize, step: f64) {
             } else {
                 0.0
             };
-            grad[idx] = gy.max(gx);
+            *g = gy.max(gx);
         }
-    }
+    });
 
-    // --- 5x5 box-max dilation + thresholding -> edge_zone mask ---
-    let mut edge_zone = vec![false; n];
-    let mut any_edge = false;
-    for r in 0..h {
-        for c in 0..w {
-            let mut mx = 0.0f64;
-            let r_lo = if r >= PAD { r - PAD } else { 0 };
-            let r_hi = (r + PAD).min(h - 1);
+    // --- Separable box-max dilation (rows then columns) + thresholding.
+    // max() is exact, so splitting the 5x5 window into two 1-D passes gives
+    // bit-identical results to the direct 2-D maximum.
+    let mut row_max = vec![0.0f64; n];
+    row_max.par_chunks_mut(w).enumerate().for_each(|(r, row)| {
+        let base = r * w;
+        for (c, m) in row.iter_mut().enumerate() {
             let c_lo = if c >= PAD { c - PAD } else { 0 };
             let c_hi = (c + PAD).min(w - 1);
-            for rr in r_lo..=r_hi {
-                for cc in c_lo..=c_hi {
-                    let g = grad[rr * w + cc];
-                    if g > mx { mx = g; }
+            let mut mx = 0.0f64;
+            for cc in c_lo..=c_hi {
+                let g = grad[base + cc];
+                if g > mx {
+                    mx = g;
                 }
             }
-            if mx > EDGE_THRESH {
-                edge_zone[r * w + c] = true;
-                any_edge = true;
-            }
+            *m = mx;
         }
-    }
+    });
+    let mut edge_zone = vec![false; n];
+    let any_edge = edge_zone
+        .par_chunks_mut(w)
+        .enumerate()
+        .map(|(r, row)| {
+            let r_lo = if r >= PAD { r - PAD } else { 0 };
+            let r_hi = (r + PAD).min(h - 1);
+            let mut any = false;
+            for (c, e) in row.iter_mut().enumerate() {
+                let mut mx = 0.0f64;
+                for rr in r_lo..=r_hi {
+                    let g = row_max[rr * w + c];
+                    if g > mx {
+                        mx = g;
+                    }
+                }
+                if mx > EDGE_THRESH {
+                    *e = true;
+                    any = true;
+                }
+            }
+            any
+        })
+        .reduce(|| false, |a, b| a || b);
 
     if !any_edge {
         return;
@@ -874,45 +972,42 @@ pub fn anti_ring_sigma(plane: &mut [f64], h: usize, w: usize, step: f64) {
     let iw = w as i32;
     let ipad = PAD as i32;
 
-    plane
-        .par_chunks_mut(w)
-        .enumerate()
-        .for_each(|(r, row)| {
-            let ir = r as i32;
-            for c in 0..w {
-                if !edge_zone[r * w + c] {
-                    continue;
-                }
-                let center = src[r * w + c];
+    plane.par_chunks_mut(w).enumerate().for_each(|(r, row)| {
+        let ir = r as i32;
+        for c in 0..w {
+            if !edge_zone[r * w + c] {
+                continue;
+            }
+            let center = src[r * w + c];
 
-                // Luminance-adaptive sigma: tighter in dark zones (Weber)
-                let local_sigma = if center < 60.0 {
-                    sigma_t * 0.4  // dark: very tight
-                } else if center < 120.0 {
-                    sigma_t * 0.7  // mid-dark
-                } else {
-                    sigma_t        // normal
-                };
+            // Luminance-adaptive sigma: tighter in dark zones (Weber)
+            let local_sigma = if center < 60.0 {
+                sigma_t * 0.4 // dark: very tight
+            } else if center < 120.0 {
+                sigma_t * 0.7 // mid-dark
+            } else {
+                sigma_t // normal
+            };
 
-                let mut total = 0.0f64;
-                let mut count = 0u32;
+            let mut total = 0.0f64;
+            let mut count = 0u32;
 
-                for dy in -ipad..=ipad {
-                    let rr = reflect(ir + dy, ih);
-                    for dx in -ipad..=ipad {
-                        let cc = reflect(c as i32 + dx, iw);
-                        let val = src[rr * w + cc];
-                        if (val - center).abs() <= local_sigma {
-                            total += val;
-                            count += 1;
-                        }
+            for dy in -ipad..=ipad {
+                let rr = reflect(ir + dy, ih);
+                for dx in -ipad..=ipad {
+                    let cc = reflect(c as i32 + dx, iw);
+                    let val = src[rr * w + cc];
+                    if (val - center).abs() <= local_sigma {
+                        total += val;
+                        count += 1;
                     }
                 }
-                if count > 0 {
-                    row[c] = total / count as f64;
-                }
             }
-        });
+            if count > 0 {
+                row[c] = total / count as f64;
+            }
+        }
+    });
 }
 
 // ======================================================================
@@ -929,7 +1024,9 @@ pub fn anti_ring_sigma(plane: &mut [f64], h: usize, w: usize, step: f64) {
 /// Unlike deblock_lot_grid (which uses cosine window over 8px, -0.59 dB),
 /// this touches only the immediate boundary pixels (≤ -0.1 dB target).
 pub fn deblock_gas_only(plane: &mut [f64], h: usize, w: usize, block_size: usize) {
-    if h < block_size * 2 || w < block_size * 2 { return; }
+    if h < block_size * 2 || w < block_size * 2 {
+        return;
+    }
 
     // Gas threshold: pixels with gradient below this are "gas" (smooth)
     const GAS_THRESH: f64 = 2.5;
@@ -938,27 +1035,35 @@ pub fn deblock_gas_only(plane: &mut [f64], h: usize, w: usize, block_size: usize
 
     let src = plane.to_vec();
 
-    // Vertical grid lines (x = k * block_size)
-    for gx in 1..(w / block_size) {
-        let bx = gx * block_size;
-        if bx < 2 || bx + 1 >= w { continue; }
-
-        for y in 0..h {
-            let p_left  = src[y * w + bx - 1];
+    // Vertical grid lines (x = k * block_size) — parallel by row: every row
+    // only writes its own cells and all reads come from the snapshot, so the
+    // values are identical to the sequential gx-major loop.
+    plane.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for gx in 1..(w / block_size) {
+            let bx = gx * block_size;
+            if bx < 2 || bx + 1 >= w {
+                continue;
+            }
+            let p_left = src[y * w + bx - 1];
             let p_right = src[y * w + bx];
             let boundary_step = (p_right - p_left).abs();
 
             // Check interior smoothness (2 pixels on each side)
             let grad_left = if bx >= 2 {
                 (src[y * w + bx - 1] - src[y * w + bx - 2]).abs()
-            } else { boundary_step };
+            } else {
+                boundary_step
+            };
             let grad_right = if bx + 2 < w {
                 (src[y * w + bx + 1] - src[y * w + bx]).abs()
-            } else { boundary_step };
+            } else {
+                boundary_step
+            };
 
             // Gas: both sides smooth AND boundary step is an artifact
-            let is_gas = grad_left < GAS_THRESH && grad_right < GAS_THRESH
-                         && boundary_step > grad_left.max(grad_right);
+            let is_gas = grad_left < GAS_THRESH
+                && grad_right < GAS_THRESH
+                && boundary_step > grad_left.max(grad_right);
 
             if is_gas {
                 // Weber-adaptive blend: stronger in dark areas where blocking is more visible.
@@ -966,42 +1071,62 @@ pub fn deblock_gas_only(plane: &mut [f64], h: usize, w: usize, block_size: usize
                 let lum = (p_left.abs() + p_right.abs()) * 0.5;
                 let weber_blend = (BLEND + (1.0 - BLEND) * (1.0 - lum / 255.0)).min(0.95);
                 let mid = (p_left + p_right) * 0.5;
-                plane[y * w + bx - 1] = p_left  + weber_blend * (mid - p_left);
-                plane[y * w + bx]     = p_right + weber_blend * (mid - p_right);
+                row[bx - 1] = p_left + weber_blend * (mid - p_left);
+                row[bx] = p_right + weber_blend * (mid - p_right);
             }
         }
-    }
+    });
 
-    // Horizontal grid lines (y = k * block_size)
+    // Horizontal grid lines (y = k * block_size) — parallel by boundary.
+    // Chunks of block_size rows starting at row block_size-1: chunk k's first
+    // two rows are exactly (by-1, by) for by = (k+1)*block_size, so each
+    // boundary writes into its own chunk while reading from the snapshot.
     let src2 = plane.to_vec(); // refresh after vertical pass
-    for gy in 1..(h / block_size) {
-        let by = gy * block_size;
-        if by < 2 || by + 1 >= h { continue; }
-
-        for x in 0..w {
-            let p_top    = src2[(by - 1) * w + x];
-            let p_bottom = src2[by * w + x];
-            let boundary_step = (p_bottom - p_top).abs();
-
-            let grad_top = if by >= 2 {
-                (src2[(by - 1) * w + x] - src2[(by - 2) * w + x]).abs()
-            } else { boundary_step };
-            let grad_bot = if by + 2 < h {
-                (src2[(by + 1) * w + x] - src2[by * w + x]).abs()
-            } else { boundary_step };
-
-            let is_gas = grad_top < GAS_THRESH && grad_bot < GAS_THRESH
-                         && boundary_step > grad_top.max(grad_bot);
-
-            if is_gas {
-                let lum = (p_top.abs() + p_bottom.abs()) * 0.5;
-                let weber_blend = (BLEND + (1.0 - BLEND) * (1.0 - lum / 255.0)).min(0.95);
-                let mid = (p_top + p_bottom) * 0.5;
-                plane[(by - 1) * w + x] = p_top    + weber_blend * (mid - p_top);
-                plane[by * w + x]       = p_bottom + weber_blend * (mid - p_bottom);
+    let n_gy = h / block_size;
+    plane[w * (block_size - 1)..]
+        .par_chunks_mut(block_size * w)
+        .enumerate()
+        .for_each(|(k, chunk)| {
+            let gy = k + 1;
+            if gy >= n_gy {
+                return;
             }
-        }
-    }
+            let by = gy * block_size;
+            if by < 2 || by + 1 >= h || chunk.len() < 2 * w {
+                return;
+            }
+            let (row_top, rest) = chunk.split_at_mut(w);
+            let row_bottom = &mut rest[..w];
+
+            for x in 0..w {
+                let p_top = src2[(by - 1) * w + x];
+                let p_bottom = src2[by * w + x];
+                let boundary_step = (p_bottom - p_top).abs();
+
+                let grad_top = if by >= 2 {
+                    (src2[(by - 1) * w + x] - src2[(by - 2) * w + x]).abs()
+                } else {
+                    boundary_step
+                };
+                let grad_bot = if by + 2 < h {
+                    (src2[(by + 1) * w + x] - src2[by * w + x]).abs()
+                } else {
+                    boundary_step
+                };
+
+                let is_gas = grad_top < GAS_THRESH
+                    && grad_bot < GAS_THRESH
+                    && boundary_step > grad_top.max(grad_bot);
+
+                if is_gas {
+                    let lum = (p_top.abs() + p_bottom.abs()) * 0.5;
+                    let weber_blend = (BLEND + (1.0 - BLEND) * (1.0 - lum / 255.0)).min(0.95);
+                    let mid = (p_top + p_bottom) * 0.5;
+                    row_top[x] = p_top + weber_blend * (mid - p_top);
+                    row_bottom[x] = p_bottom + weber_blend * (mid - p_bottom);
+                }
+            }
+        });
 }
 
 // ==========================================================================
@@ -1020,17 +1145,28 @@ pub fn casp_sharpen(plane: &mut [f64], h: usize, w: usize, strength: f64) {
     let src = plane.to_vec();
 
     // Gaussian blur radius scales with image size for visible effect
-    let sigma = if h.max(w) > 2000 { 2.0 } else if h.max(w) > 1000 { 1.5 } else { 1.0 };
+    let sigma = if h.max(w) > 2000 {
+        2.0
+    } else if h.max(w) > 1000 {
+        1.5
+    } else {
+        1.0
+    };
     let blurred = gaussian_blur_2d(&src, h, w, sigma);
 
     // Sobel edge magnitude for adaptive control
     let mut edge = vec![0.0f64; h * w];
     for y in 1..h - 1 {
         for x in 1..w - 1 {
-            let gx = (src[(y - 1) * w + x + 1] + 2.0 * src[y * w + x + 1] + src[(y + 1) * w + x + 1])
-                   - (src[(y - 1) * w + x - 1] + 2.0 * src[y * w + x - 1] + src[(y + 1) * w + x - 1]);
-            let gy = (src[(y + 1) * w + x - 1] + 2.0 * src[(y + 1) * w + x] + src[(y + 1) * w + x + 1])
-                   - (src[(y - 1) * w + x - 1] + 2.0 * src[(y - 1) * w + x] + src[(y - 1) * w + x + 1]);
+            let gx = (src[(y - 1) * w + x + 1]
+                + 2.0 * src[y * w + x + 1]
+                + src[(y + 1) * w + x + 1])
+                - (src[(y - 1) * w + x - 1] + 2.0 * src[y * w + x - 1] + src[(y + 1) * w + x - 1]);
+            let gy =
+                (src[(y + 1) * w + x - 1] + 2.0 * src[(y + 1) * w + x] + src[(y + 1) * w + x + 1])
+                    - (src[(y - 1) * w + x - 1]
+                        + 2.0 * src[(y - 1) * w + x]
+                        + src[(y - 1) * w + x + 1]);
             edge[y * w + x] = (gx * gx + gy * gy).sqrt();
         }
     }
@@ -1052,7 +1188,9 @@ pub fn casp_sharpen(plane: &mut [f64], h: usize, w: usize, strength: f64) {
 
 /// Separable Gaussian blur for dsp module (self-contained).
 fn gaussian_blur_2d(input: &[f64], h: usize, w: usize, sigma: f64) -> Vec<f64> {
-    if sigma < 0.01 { return input.to_vec(); }
+    if sigma < 0.01 {
+        return input.to_vec();
+    }
     let radius = (3.0 * sigma).ceil() as usize;
     let ks = 2 * radius + 1;
 
@@ -1066,7 +1204,9 @@ fn gaussian_blur_2d(input: &[f64], h: usize, w: usize, sigma: f64) -> Vec<f64> {
         kernel.push(v);
         sum += v;
     }
-    for k in &mut kernel { *k /= sum; }
+    for k in &mut kernel {
+        *k /= sum;
+    }
 
     // Horizontal pass
     let mut temp = vec![0.0; h * w];
@@ -1101,7 +1241,13 @@ fn gaussian_blur_2d(input: &[f64], h: usize, w: usize, sigma: f64) -> Vec<f64> {
 /// Computes a Sobel edge mask, then applies an unsharp mask whose strength
 /// is *reduced* near strong edges (avoids halo/ringing) and *increased*
 /// in smooth areas (recovers lost detail from quantization).
-pub fn adaptive_sharpen(plane: &mut [f64], h: usize, w: usize, strength: f64, _edge_threshold: f64) {
+pub fn adaptive_sharpen(
+    plane: &mut [f64],
+    h: usize,
+    w: usize,
+    strength: f64,
+    _edge_threshold: f64,
+) {
     if strength <= 0.0 || h < 3 || w < 3 {
         return;
     }
@@ -1111,10 +1257,15 @@ pub fn adaptive_sharpen(plane: &mut [f64], h: usize, w: usize, strength: f64, _e
     let mut edge = vec![0.0f64; h * w];
     for y in 1..h - 1 {
         for x in 1..w - 1 {
-            let gx = (src[(y - 1) * w + x + 1] + 2.0 * src[y * w + x + 1] + src[(y + 1) * w + x + 1])
-                   - (src[(y - 1) * w + x - 1] + 2.0 * src[y * w + x - 1] + src[(y + 1) * w + x - 1]);
-            let gy = (src[(y + 1) * w + x - 1] + 2.0 * src[(y + 1) * w + x] + src[(y + 1) * w + x + 1])
-                   - (src[(y - 1) * w + x - 1] + 2.0 * src[(y - 1) * w + x] + src[(y - 1) * w + x + 1]);
+            let gx = (src[(y - 1) * w + x + 1]
+                + 2.0 * src[y * w + x + 1]
+                + src[(y + 1) * w + x + 1])
+                - (src[(y - 1) * w + x - 1] + 2.0 * src[y * w + x - 1] + src[(y + 1) * w + x - 1]);
+            let gy =
+                (src[(y + 1) * w + x - 1] + 2.0 * src[(y + 1) * w + x] + src[(y + 1) * w + x + 1])
+                    - (src[(y - 1) * w + x - 1]
+                        + 2.0 * src[(y - 1) * w + x]
+                        + src[(y - 1) * w + x + 1]);
             edge[y * w + x] = (gx * gx + gy * gy).sqrt();
         }
     }
@@ -1190,4 +1341,3 @@ pub fn post_sharpen(plane: &mut [f64], h: usize, w: usize, mode: u8, strength: f
         _ => {} // 0 or unknown = off
     }
 }
-

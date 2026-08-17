@@ -27,8 +27,9 @@ impl fmt::Display for AureaError {
             AureaError::DecodeFailed(msg) => write!(f, "Decode failed: {}", msg),
             AureaError::EncodeFailed(msg) => write!(f, "Encode failed: {}", msg),
             AureaError::Io(e) => write!(f, "I/O error: {}", e),
-            AureaError::DimensionMismatch { expected, got } =>
-                write!(f, "Dimension mismatch: expected {}, got {}", expected, got),
+            AureaError::DimensionMismatch { expected, got } => {
+                write!(f, "Dimension mismatch: expected {}, got {}", expected, got)
+            }
         }
     }
 }

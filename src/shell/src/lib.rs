@@ -1,24 +1,20 @@
 /// Windows shell extension for .aur
 /// - IThumbnailProvider : native previews in Explorer
 /// - IWICBitmapDecoder : WIC support (Photos, Paint, etc.)
-
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
-use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::UI::Shell::*;
+use windows::core::*;
 
 // CLSIDs
-const CLSID_AUREA_THUMBNAIL: GUID =
-    GUID::from_u128(0x267A0E00_C0DE_4ABC_9DEF_000000267011);
-const CLSID_AUREA_WIC_DECODER: GUID =
-    GUID::from_u128(0x267A0E00_C0DE_4ABC_9DEF_000000267012);
-const GUID_AUREA_CONTAINER: GUID =
-    GUID::from_u128(0x267A0E00_C0DE_4ABC_9DEF_000000267013);
+const CLSID_AUREA_THUMBNAIL: GUID = GUID::from_u128(0x267A0E00_C0DE_4ABC_9DEF_000000267011);
+const CLSID_AUREA_WIC_DECODER: GUID = GUID::from_u128(0x267A0E00_C0DE_4ABC_9DEF_000000267012);
+const GUID_AUREA_CONTAINER: GUID = GUID::from_u128(0x267A0E00_C0DE_4ABC_9DEF_000000267013);
 
 const CLASS_E_CLASSNOTAVAILABLE: HRESULT = HRESULT(0x80040111_u32 as i32);
 const CLASS_E_NOAGGREGATION: HRESULT = HRESULT(0x80040110_u32 as i32);
@@ -27,8 +23,7 @@ const WINCODEC_ERR_CODECNOTHUMBNAIL: HRESULT = HRESULT(0x88982F44_u32 as i32);
 const WINCODEC_ERR_UNSUPPORTEDOPERATION: HRESULT = HRESULT(0x88982F81_u32 as i32);
 
 // CLSID WICImagingFactory (cacaf262-9370-4615-a13b-9f5539da4c0a)
-const CLSID_WIC_IMAGING_FACTORY: GUID =
-    GUID::from_u128(0xcacaf262_9370_4615_a13b_9f5539da4c0a);
+const CLSID_WIC_IMAGING_FACTORY: GUID = GUID::from_u128(0xcacaf262_9370_4615_a13b_9f5539da4c0a);
 
 // Magic bytes AURA: 0x41 0x55 0x52 0x41
 const AUREA_MAGIC: &[u8; 4] = b"AURA";
@@ -148,12 +143,9 @@ impl AureaThumbnailProvider_Impl {
         // Decode AUREA -> RGB
         let decoded = aurea_core::decode_aurea(&data).map_err(|_| Error::from(E_FAIL))?;
 
-        let img = image::RgbImage::from_raw(
-            decoded.width as u32,
-            decoded.height as u32,
-            decoded.rgb,
-        )
-        .ok_or(Error::from(E_FAIL))?;
+        let img =
+            image::RgbImage::from_raw(decoded.width as u32, decoded.height as u32, decoded.rgb)
+                .ok_or(Error::from(E_FAIL))?;
 
         // Proportional resize (largest dimension = cx)
         let max_dim = decoded.width.max(decoded.height) as f64;
@@ -161,8 +153,7 @@ impl AureaThumbnailProvider_Impl {
         let tw = ((decoded.width as f64 * scale) as u32).max(1);
         let th = ((decoded.height as f64 * scale) as u32).max(1);
 
-        let thumb =
-            image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
+        let thumb = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
 
         let tw_i = thumb.width() as i32;
         let th_i = thumb.height() as i32;
@@ -195,15 +186,14 @@ impl AureaThumbnailProvider_Impl {
         .map_err(|_| Error::from(E_FAIL))?;
 
         // Copy RGB -> BGRA
-        let pixel_data = unsafe {
-            std::slice::from_raw_parts_mut(bits as *mut u8, (tw_i * th_i * 4) as usize)
-        };
+        let pixel_data =
+            unsafe { std::slice::from_raw_parts_mut(bits as *mut u8, (tw_i * th_i * 4) as usize) };
         for (i, pixel) in thumb.pixels().enumerate() {
             let o = i * 4;
-            pixel_data[o] = pixel[2];     // B
+            pixel_data[o] = pixel[2]; // B
             pixel_data[o + 1] = pixel[1]; // G
             pixel_data[o + 2] = pixel[0]; // R
-            pixel_data[o + 3] = 255;      // A
+            pixel_data[o + 3] = 255; // A
         }
 
         unsafe {
@@ -281,10 +271,10 @@ impl IWICBitmapDecoder_Impl for AureaWicDecoder_Impl {
             let npix = decoded.width * decoded.height;
             let mut bgra = vec![0u8; npix * 4];
             for i in 0..npix {
-                bgra[i * 4] = decoded.rgb[i * 3 + 2];     // B
+                bgra[i * 4] = decoded.rgb[i * 3 + 2]; // B
                 bgra[i * 4 + 1] = decoded.rgb[i * 3 + 1]; // G
-                bgra[i * 4 + 2] = decoded.rgb[i * 3];     // R
-                bgra[i * 4 + 3] = 255;                     // A
+                bgra[i * 4 + 2] = decoded.rgb[i * 3]; // R
+                bgra[i * 4 + 3] = 255; // A
             }
 
             let mut state = self.state.lock().unwrap();
@@ -303,11 +293,8 @@ impl IWICBitmapDecoder_Impl for AureaWicDecoder_Impl {
 
     fn GetDecoderInfo(&self) -> Result<IWICBitmapDecoderInfo> {
         unsafe {
-            let factory: IWICImagingFactory = CoCreateInstance(
-                &CLSID_WIC_IMAGING_FACTORY,
-                None,
-                CLSCTX_INPROC_SERVER,
-            )?;
+            let factory: IWICImagingFactory =
+                CoCreateInstance(&CLSID_WIC_IMAGING_FACTORY, None, CLSCTX_INPROC_SERVER)?;
             let info = factory.CreateComponentInfo(&CLSID_AUREA_WIC_DECODER)?;
             info.cast()
         }
@@ -426,8 +413,7 @@ impl IWICBitmapSource_Impl for AureaWicFrame_Impl {
         let dst_stride = cbstride as usize;
         let row_bytes = w as usize * 4;
 
-        let dst =
-            unsafe { std::slice::from_raw_parts_mut(pbbuffer, cbbuffersize as usize) };
+        let dst = unsafe { std::slice::from_raw_parts_mut(pbbuffer, cbbuffersize as usize) };
 
         for row in 0..h as usize {
             let src_off = (y as usize + row) * src_stride + x as usize * 4;

@@ -1,8 +1,6 @@
 /// Native AUREA viewer (.aur)
 /// Scroll wheel zoom, drag pan, Escape to close, 0/Home to fit.
-
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
-
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

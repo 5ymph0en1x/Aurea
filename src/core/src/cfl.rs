@@ -78,7 +78,9 @@ pub fn estimate_alpha_ac(l_ac_rec: &[f64], c_ac_orig: &[f64]) -> (usize, f64, bo
 /// Returns the residual (in AC frequency domain).
 pub fn apply_prediction(l_rec_block: &[f64], c_block: &[f64], alpha_idx: usize) -> Vec<f64> {
     let alpha = ALPHA_PALETTE[alpha_idx.min(7)];
-    c_block.iter().zip(l_rec_block.iter())
+    c_block
+        .iter()
+        .zip(l_rec_block.iter())
         .map(|(&c, &l)| c - alpha * l)
         .collect()
 }
@@ -87,7 +89,9 @@ pub fn apply_prediction(l_rec_block: &[f64], c_block: &[f64], alpha_idx: usize) 
 /// Both residual and l_rec_block are in AC frequency domain.
 pub fn reconstruct(l_rec_block: &[f64], residual: &[f64], alpha_idx: usize) -> Vec<f64> {
     let alpha = ALPHA_PALETTE[alpha_idx.min(7)];
-    residual.iter().zip(l_rec_block.iter())
+    residual
+        .iter()
+        .zip(l_rec_block.iter())
         .map(|(&r, &l)| r + alpha * l)
         .collect()
 }
@@ -150,7 +154,10 @@ mod tests {
         let residual = apply_prediction(&l, &c, idx);
         let recon = reconstruct(&l, &residual, idx);
         for i in 0..c.len() {
-            assert!((recon[i] - c[i]).abs() < 1e-10, "CfL AC roundtrip mismatch at {i}");
+            assert!(
+                (recon[i] - c[i]).abs() < 1e-10,
+                "CfL AC roundtrip mismatch at {i}"
+            );
         }
     }
 }
