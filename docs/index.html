@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>AUREA v32 vs JPEG — Rate-matched showcase</title>
+<title>AUREA v33 vs JPEG — Rate-matched showcase</title>
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:#0a0a0a; color:#e0e0e0; font-family:'Segoe UI',system-ui,sans-serif; padding:20px; max-width:1400px; margin:0 auto; }
@@ -118,9 +118,9 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
 </style>
 </head>
 <body>
-<h1>AUREA v32 vs JPEG</h1>
+<h1>AUREA v33 vs JPEG</h1>
 <p class="subtitle">Same file size. Different fidelity. Native-resolution PSNR plus LPIPS and DISTS on a 1024 px perceptual grid.</p>
-<div class="version-pill">AUR2 v32 · PERCEPTUAL TEXTURE LAW · EOB-DRIVEN STEP FIELD · 2026-08-17</div>
+<div class="version-pill">AUR2 v33 · EOB STEP FIELDS · PERIODIC-SAFE DEBLOCK · 2026-08-18</div>
 <nav class="jump-nav" aria-label="Page sections">
     <a href="#frontier">Analytical frontier</a>
     <a href="#showcase">Visual evidence</a>
@@ -129,7 +129,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
 
 <div class="hero">
     <div class="hero-stat">
-        <div class="val" style="color:#4caf50">+1.96 dB</div>
+        <div class="val" style="color:#4caf50">+2.00 dB</div>
         <div class="lbl">PSNR advantage</div>
         <div class="wins">Mathematical fidelity</div>
     </div>
@@ -147,22 +147,22 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
 
 <section class="research" id="frontier">
     <h2>The analytical frontier</h2>
-    <p class="research-intro">BD-rate integrates the complete rate-distortion curves, rather than cherry-picking one quality setting. Negative values mean AUREA needs fewer bits to reach the same fidelity. Results cover all 12 source PNGs at native resolution. In v32, AUREA wins every LPIPS and DISTS pair of the visual sheet below, and Y wins 12/12 images against optimized JPEG 4:2:0.</p>
+    <p class="research-intro">BD-rate integrates the complete rate-distortion curves, rather than cherry-picking one quality setting. Negative values mean AUREA needs fewer bits to reach the same fidelity. Results cover all 12 source PNGs at native resolution. In v33, AUREA wins every LPIPS and DISTS pair of the visual sheet below, and Y wins 12/12 images against optimized JPEG 4:2:0.</p>
     <div class="bd-grid">
         <article class="bd-card">
             <h3>vs optimized JPEG 4:2:0</h3>
             <div class="bd-values">
-                <div class="bd-value gain"><strong>−37.22%</strong><span>RGB PSNR · 12/12 wins</span></div>
-                <div class="bd-value gain"><strong>−45.24%</strong><span>mean ΔE2000 · 12/12</span></div>
-                <div class="bd-value gain"><strong>−9.69%</strong><span>Y PSNR · 12/12</span></div>
+                <div class="bd-value gain"><strong>−37.18%</strong><span>RGB PSNR · 12/12 wins</span></div>
+                <div class="bd-value gain"><strong>−44.78%</strong><span>mean ΔE2000 · 12/12</span></div>
+                <div class="bd-value gain"><strong>−10.38%</strong><span>Y PSNR · 12/12</span></div>
             </div>
         </article>
         <article class="bd-card">
             <h3>vs optimized JPEG 4:4:4</h3>
             <div class="bd-values">
-                <div class="bd-value gain"><strong>−31.33%</strong><span>RGB PSNR · 12/12 wins</span></div>
-                <div class="bd-value gain"><strong>−26.91%</strong><span>mean ΔE2000 · 12/12</span></div>
-                <div class="bd-value gain"><strong>−30.78%</strong><span>Y PSNR · 12/12 wins</span></div>
+                <div class="bd-value gain"><strong>−31.68%</strong><span>RGB PSNR · 12/12 wins</span></div>
+                <div class="bd-value gain"><strong>−26.70%</strong><span>mean ΔE2000 · 12/12</span></div>
+                <div class="bd-value gain"><strong>−31.57%</strong><span>Y PSNR · 12/12 wins</span></div>
             </div>
         </article>
     </div>
@@ -173,7 +173,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
         <figure><img src="curves/bd_rgb_by_image.svg" alt="Per-image RGB PSNR BD-rate"><figcaption>RGB BD-rate, image by image.</figcaption></figure>
         <figure><img src="curves/timing.svg" alt="Mean encoding and decoding timings"><figcaption>Current speed cost of the experimental codec.</figcaption></figure>
     </div>
-    <p class="fine-print">The cubic BD-rate is cross-checked with piecewise-linear integration. JPEG points use libjpeg-turbo and retain the smaller optimized sequential/progressive output. AUR2 v28 hands kryte's surplus luminance back to its chroma on the diffuse-dark field (eleven of twelve originals stay byte-identical). AUR2 v29 adds a quality-keyed perceptual texture law, calibrated on this sheet's own rate-matched protocol: at low quality the trellis keeps texture instead of MSE (lambda 8, activity-modulated, C2 weight 1.75) and the decoder restores punch (contrast-floored XSharpen + a cored unsharp mask); at high quality the anti-ring sigma filter switches off. AUR2 v30 adds the EOB-driven luma step field above q30: the transmitted end-of-block positions carry the intra-block activity (rank correlation 0.887 with squared error), and both sides derive a zero-bit log-neutral step refinement toward the blocks that hold the error. Luminance BD-rate against optimized JPEG 4:2:0 turns negative on all twelve images; v31 extends the same field to the two chroma channels, each driven by its own transmitted EOBs; v32 mutes the sharpening chain and softens the luma field on the diffuse-dark signature, closing the last SSIM cell. Every cubic BD-rate cell of this report, on every image, every metric and both JPEG profiles, is now negative.</p>
+    <p class="fine-print">The cubic BD-rate is cross-checked with piecewise-linear integration. JPEG points use libjpeg-turbo and retain the smaller optimized sequential/progressive output. AUR2 v28 hands kryte's surplus luminance back to its chroma on the diffuse-dark field (eleven of twelve originals stay byte-identical). AUR2 v29 adds a quality-keyed perceptual texture law, calibrated on this sheet's own rate-matched protocol: at low quality the trellis keeps texture instead of MSE (lambda 8, activity-modulated, C2 weight 1.75) and the decoder restores punch (contrast-floored XSharpen + a cored unsharp mask); at high quality the anti-ring sigma filter switches off. AUR2 v30 adds the EOB-driven luma step field above q30: the transmitted end-of-block positions carry the intra-block activity (rank correlation 0.887 with squared error), and both sides derive a zero-bit log-neutral step refinement toward the blocks that hold the error. Luminance BD-rate against optimized JPEG 4:2:0 turns negative on all twelve images; v31 extends the same field to the two chroma channels, each driven by its own transmitted EOBs; v32 mutes the sharpening chain and softens the luma field on the diffuse-dark signature, closing the last SSIM cell. AUR2 v33 hardens the decoder's gas-deblocking against grid-aligned periodic content: the smoothness window widens to four steps per side and the boundary step is capped by what quantization can actually produce, so checkerboards and binary noise are no longer mistaken for blocking artifacts (a 2px checkerboard now round-trips lossless at q20) while every natural-corpus q75 decode gains up to +0.17 dB. Every cubic BD-rate cell of this report, on every image, every metric and both JPEG profiles, is negative.</p>
 </section>
 
 <div class="legend-bar" id="showcase">
@@ -191,7 +191,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>241 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.92 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.89 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="agree/jpeg_q43.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -237,7 +237,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <span>AUREA 99.3%</span>
             <span>JPEG 96.7%</span>
         </div>
-        <div class="gauge-raw">0.0073 vs 0.0334 (lower = better)</div>
+        <div class="gauge-raw">0.0072 vs 0.0334 (lower = better)</div>
     </div>
                         
     <div class="gauge">
@@ -253,7 +253,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <span>AUREA 98.3%</span>
             <span>JPEG 95.7%</span>
         </div>
-        <div class="gauge-raw">0.0169 vs 0.0431 (lower = better)</div>
+        <div class="gauge-raw">0.0168 vs 0.0431 (lower = better)</div>
     </div>
                         <div class="verdict-bottom">
                             <span class="legend-dot aurea-dot"></span> AUREA 4:4:4
@@ -265,7 +265,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>1315 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.23 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.29 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="agree/jpeg_q93.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -324,7 +324,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="bar jpeg-bar" style="width:89.7%"></div>
         </div>
         <div class="gauge-vals">
-            <span>AUREA 100.0%</span>
+            <span>AUREA 99.9%</span>
             <span>JPEG 99.6%</span>
         </div>
         <div class="gauge-raw">0.0005 vs 0.0037 (lower = better)</div>
@@ -346,7 +346,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>286 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.50 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.49 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="alchemist/jpeg_q69.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -408,7 +408,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <span>AUREA 99.6%</span>
             <span>JPEG 99.1%</span>
         </div>
-        <div class="gauge-raw">0.0044 vs 0.0090 (lower = better)</div>
+        <div class="gauge-raw">0.0043 vs 0.0090 (lower = better)</div>
     </div>
                         <div class="verdict-bottom">
                             <span class="legend-dot aurea-dot"></span> AUREA 4:4:4
@@ -420,7 +420,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>1328 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.09 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.20 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="alchemist/jpeg_q96.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -438,7 +438,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=75</div>
                         <img src="alchemist/diff_aurea_q75.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">45.4 dB</span>
+                            <span class="psnr">45.5 dB</span>
                             <span class="size">1328 KB</span>
                         </div>
                     </div>
@@ -476,13 +476,13 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
         </div>
         <div class="gauge-bars">
             <div class="bar aurea-bar" style="width:90.0%"></div>
-            <div class="bar jpeg-bar" style="width:89.9%"></div>
+            <div class="bar jpeg-bar" style="width:90.0%"></div>
         </div>
         <div class="gauge-vals">
             <span>AUREA 100.0%</span>
             <span>JPEG 99.9%</span>
         </div>
-        <div class="gauge-raw">0.0002 vs 0.0008 (lower = better)</div>
+        <div class="gauge-raw">0.0003 vs 0.0008 (lower = better)</div>
     </div>
                         <div class="verdict-bottom">
                             <span class="legend-dot aurea-dot"></span> AUREA 4:4:4
@@ -501,7 +501,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>264 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +0.69 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +0.65 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="burn_out/jpeg_q48.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -547,7 +547,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <span>AUREA 99.5%</span>
             <span>JPEG 98.7%</span>
         </div>
-        <div class="gauge-raw">0.0050 vs 0.0127 (lower = better)</div>
+        <div class="gauge-raw">0.0051 vs 0.0127 (lower = better)</div>
     </div>
                         
     <div class="gauge">
@@ -557,13 +557,13 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
         </div>
         <div class="gauge-bars">
             <div class="bar aurea-bar" style="width:90.0%"></div>
-            <div class="bar jpeg-bar" style="width:89.0%"></div>
+            <div class="bar jpeg-bar" style="width:89.1%"></div>
         </div>
         <div class="gauge-vals">
-            <span>AUREA 98.5%</span>
+            <span>AUREA 98.4%</span>
             <span>JPEG 97.4%</span>
         </div>
-        <div class="gauge-raw">0.0154 vs 0.0259 (lower = better)</div>
+        <div class="gauge-raw">0.0158 vs 0.0259 (lower = better)</div>
     </div>
                         <div class="verdict-bottom">
                             <span class="legend-dot aurea-dot"></span> AUREA 4:4:4
@@ -575,7 +575,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>1177 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +3.07 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +3.20 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="burn_out/jpeg_q94.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -593,7 +593,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=75</div>
                         <img src="burn_out/diff_aurea_q75.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">47.5 dB</span>
+                            <span class="psnr">47.7 dB</span>
                             <span class="size">1177 KB</span>
                         </div>
                     </div>
@@ -656,7 +656,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>786 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.31 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.27 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="chilling/jpeg_q61.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -702,7 +702,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <span>AUREA 99.8%</span>
             <span>JPEG 99.7%</span>
         </div>
-        <div class="gauge-raw">0.0022 vs 0.0026 (lower = better)</div>
+        <div class="gauge-raw">0.0021 vs 0.0026 (lower = better)</div>
     </div>
                         
     <div class="gauge">
@@ -718,7 +718,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <span>AUREA 99.6%</span>
             <span>JPEG 99.5%</span>
         </div>
-        <div class="gauge-raw">0.0038 vs 0.0048 (lower = better)</div>
+        <div class="gauge-raw">0.0037 vs 0.0048 (lower = better)</div>
     </div>
                         <div class="verdict-bottom">
                             <span class="legend-dot aurea-dot"></span> AUREA 4:4:4
@@ -730,7 +730,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>3511 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.93 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +3.01 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="chilling/jpeg_q94.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -748,7 +748,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=75</div>
                         <img src="chilling/diff_aurea_q75.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">44.6 dB</span>
+                            <span class="psnr">44.7 dB</span>
                             <span class="size">3511 KB</span>
                         </div>
                     </div>
@@ -885,7 +885,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>1889 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.29 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.43 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="dispair/jpeg_q96.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -903,7 +903,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=75</div>
                         <img src="dispair/diff_aurea_q75.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">44.0 dB</span>
+                            <span class="psnr">44.1 dB</span>
                             <span class="size">1889 KB</span>
                         </div>
                     </div>
@@ -944,7 +944,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="bar jpeg-bar" style="width:89.9%"></div>
         </div>
         <div class="gauge-vals">
-            <span>AUREA 100.0%</span>
+            <span>AUREA 99.9%</span>
             <span>JPEG 99.8%</span>
         </div>
         <div class="gauge-raw">0.0005 vs 0.0018 (lower = better)</div>
@@ -966,7 +966,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>420 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.20 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.16 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="fine_ally/jpeg_q57.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1025,10 +1025,10 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="bar jpeg-bar" style="width:89.1%"></div>
         </div>
         <div class="gauge-vals">
-            <span>AUREA 99.5%</span>
+            <span>AUREA 99.4%</span>
             <span>JPEG 98.5%</span>
         </div>
-        <div class="gauge-raw">0.0055 vs 0.0151 (lower = better)</div>
+        <div class="gauge-raw">0.0056 vs 0.0151 (lower = better)</div>
     </div>
                         <div class="verdict-bottom">
                             <span class="legend-dot aurea-dot"></span> AUREA 4:4:4
@@ -1040,7 +1040,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>1808 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.80 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.91 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="fine_ally/jpeg_q94.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1058,7 +1058,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=75</div>
                         <img src="fine_ally/diff_aurea_q75.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">47.0 dB</span>
+                            <span class="psnr">47.1 dB</span>
                             <span class="size">1808 KB</span>
                         </div>
                     </div>
@@ -1121,7 +1121,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>564 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.07 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.04 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="honey/jpeg_q64.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1139,7 +1139,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=20</div>
                         <img src="honey/diff_aurea_q20.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">36.8 dB</span>
+                            <span class="psnr">36.7 dB</span>
                             <span class="size">564 KB</span>
                         </div>
                     </div>
@@ -1195,7 +1195,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>2316 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +3.03 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +3.15 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="honey/jpeg_q95.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1213,7 +1213,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=75</div>
                         <img src="honey/diff_aurea_q75.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">46.3 dB</span>
+                            <span class="psnr">46.4 dB</span>
                             <span class="size">2316 KB</span>
                         </div>
                     </div>
@@ -1276,7 +1276,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>326 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +0.92 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +0.89 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="kryte/jpeg_q52.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1322,7 +1322,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <span>AUREA 99.6%</span>
             <span>JPEG 99.4%</span>
         </div>
-        <div class="gauge-raw">0.0041 vs 0.0063 (lower = better)</div>
+        <div class="gauge-raw">0.0042 vs 0.0063 (lower = better)</div>
     </div>
                         
     <div class="gauge">
@@ -1338,7 +1338,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <span>AUREA 99.2%</span>
             <span>JPEG 99.0%</span>
         </div>
-        <div class="gauge-raw">0.0082 vs 0.0098 (lower = better)</div>
+        <div class="gauge-raw">0.0085 vs 0.0098 (lower = better)</div>
     </div>
                         <div class="verdict-bottom">
                             <span class="legend-dot aurea-dot"></span> AUREA 4:4:4
@@ -1350,7 +1350,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>1458 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.87 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.97 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="kryte/jpeg_q94.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1368,7 +1368,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=75</div>
                         <img src="kryte/diff_aurea_q75.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">46.1 dB</span>
+                            <span class="psnr">46.2 dB</span>
                             <span class="size">1458 KB</span>
                         </div>
                     </div>
@@ -1431,7 +1431,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>448 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.45 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.43 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="legacy/jpeg_q49.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1487,13 +1487,13 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
         </div>
         <div class="gauge-bars">
             <div class="bar aurea-bar" style="width:90.0%"></div>
-            <div class="bar jpeg-bar" style="width:89.6%"></div>
+            <div class="bar jpeg-bar" style="width:89.7%"></div>
         </div>
         <div class="gauge-vals">
-            <span>AUREA 99.4%</span>
+            <span>AUREA 99.3%</span>
             <span>JPEG 98.9%</span>
         </div>
-        <div class="gauge-raw">0.0065 vs 0.0106 (lower = better)</div>
+        <div class="gauge-raw">0.0068 vs 0.0106 (lower = better)</div>
     </div>
                         <div class="verdict-bottom">
                             <span class="legend-dot aurea-dot"></span> AUREA 4:4:4
@@ -1505,7 +1505,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>2653 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.12 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.21 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="legacy/jpeg_q95.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1523,7 +1523,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=75</div>
                         <img src="legacy/diff_aurea_q75.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">43.3 dB</span>
+                            <span class="psnr">43.4 dB</span>
                             <span class="size">2653 KB</span>
                         </div>
                     </div>
@@ -1586,7 +1586,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>554 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.38 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.37 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="mind_your_steps/jpeg_q70.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1660,7 +1660,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>2232 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.19 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.36 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="mind_your_steps/jpeg_q96.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1678,7 +1678,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=75</div>
                         <img src="mind_your_steps/diff_aurea_q75.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">43.4 dB</span>
+                            <span class="psnr">43.6 dB</span>
                             <span class="size">2232 KB</span>
                         </div>
                     </div>
@@ -1741,7 +1741,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>151 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.57 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.52 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="peace/jpeg_q38.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1759,7 +1759,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=20</div>
                         <img src="peace/diff_aurea_q20.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">38.9 dB</span>
+                            <span class="psnr">38.8 dB</span>
                             <span class="size">151 KB</span>
                         </div>
                     </div>
@@ -1787,7 +1787,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <span>AUREA 99.1%</span>
             <span>JPEG 98.3%</span>
         </div>
-        <div class="gauge-raw">0.0092 vs 0.0174 (lower = better)</div>
+        <div class="gauge-raw">0.0094 vs 0.0174 (lower = better)</div>
     </div>
                         
     <div class="gauge">
@@ -1803,7 +1803,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <span>AUREA 97.9%</span>
             <span>JPEG 96.6%</span>
         </div>
-        <div class="gauge-raw">0.0214 vs 0.0337 (lower = better)</div>
+        <div class="gauge-raw">0.0215 vs 0.0337 (lower = better)</div>
     </div>
                         <div class="verdict-bottom">
                             <span class="legend-dot aurea-dot"></span> AUREA 4:4:4
@@ -1815,7 +1815,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>650 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.79 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.82 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="peace/jpeg_q92.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1896,7 +1896,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>198 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.64 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +1.63 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="phoenix/jpeg_q53.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1955,10 +1955,10 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="bar jpeg-bar" style="width:90.0%"></div>
         </div>
         <div class="gauge-vals">
-            <span>AUREA 98.1%</span>
+            <span>AUREA 98.0%</span>
             <span>JPEG 98.0%</span>
         </div>
-        <div class="gauge-raw">0.0194 vs 0.0197 (lower = better)</div>
+        <div class="gauge-raw">0.0197 vs 0.0197 (lower = better)</div>
     </div>
                         <div class="verdict-bottom">
                             <span class="legend-dot aurea-dot"></span> AUREA 4:4:4
@@ -1970,7 +1970,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
             <div class="pair">
                 <div class="pair-header">
                     Target: <strong>942 KB</strong>
-                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.51 dB</span>
+                    <span class="psnr-badge" style="background:#4caf50">PSNR +2.62 dB</span>
                 </div>
                 <div class="compare-swipe" style="--split:50%">
                     <img src="phoenix/jpeg_q95.web.webp" class="swipe-image" loading="lazy" alt="JPEG decoded image">
@@ -1988,7 +1988,7 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
                         <div class="badge aurea">AUREA q=75</div>
                         <img src="phoenix/diff_aurea_q75.web.jpg" class="diff-img" loading="lazy">
                         <div class="cell-stats">
-                            <span class="psnr">45.0 dB</span>
+                            <span class="psnr">45.1 dB</span>
                             <span class="size">942 KB</span>
                         </div>
                     </div>
@@ -2045,12 +2045,12 @@ footer { text-align:center; color:#333; margin:30px 0; font-size:0.75em; }
 
 <section class="method" id="methodology">
     <h2>Protocol and reproducibility</h2>
-    <p>The visual sheet uses two rate-matched operating points per image: AUREA q20 against the nearest-size JPEG 4:2:0, then AUREA q75 against the nearest-size JPEG 4:4:4. Across the 24 pairs, the mean absolute size mismatch is 2.19% and AUREA wins RGB PSNR 24/24, by +1.96 dB on average.</p>
+    <p>The visual sheet uses two rate-matched operating points per image: AUREA q20 against the nearest-size JPEG 4:2:0, then AUREA q75 against the nearest-size JPEG 4:4:4. Across the 24 pairs, the mean absolute size mismatch is 2.19% and AUREA wins RGB PSNR 24/24, by +2.00 dB on average.</p>
     <p>The analytical frontier is broader: AUREA q20/40/60/80 against optimized JPEG q5–100, with RGB/Y/Cb/Cr PSNR, SSIM-Y and CIEDE2000 measured at native resolution. LPIPS (VGG) and DISTS are evaluated on a 1024 px perceptual grid for the visual sheet.</p>
     <p>Raw artifacts: <a href="results.csv">rate-matched visual results</a> · <a href="data/points.csv">all RD points</a> · <a href="data/bd_per_image.csv">per-image BD-rate</a> · <a href="data/summary.json">machine-readable summary</a> · <a href="curves/rd_rgb_by_image.svg">complete per-image RD sheet</a>.</p>
 </section>
 
-<footer>AUREA v32 rate-matched showcase &mdash; JPEG 4:2:0 below q75, 4:4:4 from q75 &mdash; Perceptual metrics by pyiqa</footer>
+<footer>AUREA v33 rate-matched showcase &mdash; JPEG 4:2:0 below q75, 4:4:4 from q75 &mdash; Perceptual metrics by pyiqa</footer>
 <script>
 document.querySelectorAll('.compare-swipe').forEach((swipe) => {
     const range = swipe.querySelector('.swipe-range');
