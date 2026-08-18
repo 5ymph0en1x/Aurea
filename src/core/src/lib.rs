@@ -158,7 +158,7 @@ pub fn decode_aurea_with_progressive_layers(
     // diffuse-dark field; v29 adds the quality-keyed perceptual texture law
     // (encoder allocation + decoder post chain). The decoder applies both
     // from the version alone, never from the process environment.
-    if (20..=32).contains(&header.version) {
+    if (20..=33).contains(&header.version) {
         return decode_aur2_v13(file_data, progressive_layers);
     }
     Err(AureaError::UnsupportedVersion(header.version))
@@ -687,6 +687,15 @@ fn decode_aur2_v13(
                     use_overlap,
                 )
                 .map_err(|e| invalid_format(format!("invalid adaptive DC layout: {e}")))?;
+                if let Some(dir) = std::env::var_os("AUREA_DEBUG_EOB_DUMP") {
+                    use std::io::Write;
+                    let path = std::path::Path::new(&dir).join("dec_dcgrid.txt");
+                    if let Ok(mut f) = std::fs::File::create(path) {
+                        for &v in &dense_dc {
+                            let _ = writeln!(f, "{:016x}", v.to_bits());
+                        }
+                    }
+                }
                 let tf = hierarchy::compute_level1(&dense_dc, *bgh, *bgw, &params);
                 block_turing_buckets = Some(hierarchy::build_adaptive_turing_buckets(
                     &tf,
@@ -720,6 +729,19 @@ fn decode_aur2_v13(
                         use_overlap,
                         &tf.inhibitor_gradient,
                     );
+                    if let Some(dir) = std::env::var_os("AUREA_DEBUG_EOB_DUMP") {
+                        use std::io::Write;
+                        static CALLS: std::sync::atomic::AtomicUsize =
+                            std::sync::atomic::AtomicUsize::new(0);
+                        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let path = std::path::Path::new(&dir)
+                            .join(format!("dec_spiral_call{call}.txt"));
+                        if let Ok(mut f) = std::fs::File::create(path) {
+                            for &b in &spiral_order {
+                                let _ = writeln!(f, "{b}");
+                            }
+                        }
+                    }
                     progressive_packets = Some(scan::progressive_spiral_packets(&spiral_order));
                 }
                 turing_field = Some(tf);
@@ -972,6 +994,17 @@ fn decode_aur2_v13(
         let packets = progressive_packets
             .as_ref()
             .ok_or_else(|| invalid_format("missing progressive spiral packet order"))?;
+        if let Some(dir) = std::env::var_os("AUREA_DEBUG_EOB_DUMP") {
+            use std::io::Write;
+            let path = std::path::Path::new(&dir).join("dec_packets_used.txt");
+            if let Ok(mut f) = std::fs::File::create(path) {
+                for (arc, packet) in packets.iter().enumerate() {
+                    for &b in packet {
+                        let _ = writeln!(f, "{arc} {b}");
+                    }
+                }
+            }
+        }
         let buckets = block_turing_buckets
             .as_ref()
             .ok_or_else(|| invalid_format("missing Turing contexts"))?;
@@ -1017,6 +1050,18 @@ fn decode_aur2_v13(
                 positions.push(previous as u16);
             }
             eob_by_channel.push(positions);
+        }
+        if let Some(dir) = std::env::var_os("AUREA_DEBUG_EOB_DUMP") {
+            use std::io::Write;
+            for (ch, positions) in eob_by_channel.iter().enumerate() {
+                let path = std::path::Path::new(&dir).join(format!("dec_ch{ch}.txt"));
+                if let Ok(mut f) = std::fs::File::create(path) {
+                    for (i, &e) in positions.iter().enumerate() {
+                        let b = buckets.get(i).copied().unwrap_or(255);
+                        let _ = writeln!(f, "{i} {e} {b}");
+                    }
+                }
+            }
         }
         eob_positions_by_channel = eob_by_channel.clone();
 
@@ -1126,8 +1171,25 @@ fn decode_aur2_v13(
                             .ok_or_else(|| invalid_format("progressive AC symbol count overflow"))
                     })?;
                 if symbol_count != expected_symbols {
+                    if let Some(dir) = std::env::var_os("AUREA_DEBUG_EOB_DUMP") {
+                        use std::io::Write;
+                        let path = std::path::Path::new(&dir)
+                            .join(format!("dec_fail_l{layer_idx}_c{channel_idx}.txt"));
+                        if let Ok(mut f) = std::fs::File::create(path) {
+                            for &b in &layer_blocks {
+                                let _ = writeln!(
+                                    f,
+                                    "{b} {}",
+                                    eob_by_channel[channel_idx][b]
+                                );
+                            }
+                        }
+                    }
                     return Err(invalid_format(format!(
-                        "progressive AC layer {layer_idx} symbol count does not match EOBs",
+                        "progressive AC layer {layer_idx} symbol count does not match EOBs \
+                         (channel {channel_idx}: stream carries {symbol_count}, EOBs imply \
+                         {expected_symbols}, {} blocks in layer)",
+                        layer_blocks.len(),
                     )));
                 }
                 let mut contexts = Vec::with_capacity(symbol_count);
@@ -2340,13 +2402,16 @@ fn decode_aur2_v13(
     // default change must ride a version bump.
     let post_t0 = std::time::Instant::now();
     if *calibration::TUNABLE_DEBLOCK {
+        // v33 streams get the strict trigger (periodic-content immunity);
+        // older streams keep the historical filter bit for bit.
+        let strict = header.version >= 33;
         // Three independent planes — deblock them concurrently.
         rayon::join(
-            || dsp::deblock_gas_only(&mut l_flat, height, width, LOT_BLOCK_SIZE),
+            || dsp::deblock_gas_only(&mut l_flat, height, width, LOT_BLOCK_SIZE, strict),
             || {
                 rayon::join(
-                    || dsp::deblock_gas_only(&mut c1_sub_flat, c1_h, c1_w, LOT_BLOCK_SIZE),
-                    || dsp::deblock_gas_only(&mut c2_sub_flat, c2_h, c2_w, LOT_BLOCK_SIZE),
+                    || dsp::deblock_gas_only(&mut c1_sub_flat, c1_h, c1_w, LOT_BLOCK_SIZE, strict),
+                    || dsp::deblock_gas_only(&mut c2_sub_flat, c2_h, c2_w, LOT_BLOCK_SIZE, strict),
                 );
             },
         );
@@ -2726,11 +2791,12 @@ mod integration_tests {
                 if *calibration::TUNABLE_CHANNEL_MEMORY {
                     // v28 relieves the luma pivot and the chroma exchange
                     // slope on the diffuse-dark field; v29 adds the
-                    // quality-keyed perceptual texture law on top.
+                    // quality-keyed perceptual texture law on top; v33 rides
+                    // the same bitstream with the strict gas-deblock decode.
                     if *calibration::TUNABLE_LUMA_PIVOT_RELIEF > 0.0
                         || *calibration::TUNABLE_SPECTRAL_CHROMA_RELIEF > 0.0
                     {
-                        32
+                        33
                     } else {
                         27
                     }

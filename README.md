@@ -12,7 +12,7 @@ tenus dans [le journal du laboratoire R&D](doc/AUREA_RD_LAB.md).
 
 AUREA is an experimental image codec that replaces JPEG's 1992-era Huffman tables and fixed 8x8 blocks with a modern pipeline: variable-size Lapped Orthogonal Transform (8/16/32), psychovisual Turing saliency fields, Chroma-from-Luma prediction, trellis rate-distortion optimization, and rANS entropy coding with Exp-Golomb magnitudes.
 
-The historical **Kodak 24** benchmark, measured on AUREA v12, achieved **-5.9% BD-Rate vs JPEG** (22/24 images won), while retaining full **4:4:4 chroma** resolution. The current experimental bitstream is **AUR2 v32**: on top of v27's entropy stack — causal `Lφ/C1/C2` vector codon, luma-weighted spectral exchange, joint color-codon RDO, spectral amplitude/phase envelope, five-way logistic context mixing, activity-keyed AC contexts, echo-primed detail layers, cross-layer channel memory — it adds the diffuse-dark chroma reliefs (v28), the perceptual texture law (v29), and the zero-bit EOB-driven quantization-step fields for luma (v30) and chroma (v31), gated by the relief field (v32). On its native 12-image corpus this build wins **every cell of the BD-rate protocol** against optimized libjpeg-turbo — 168/168 across the 4:2:0 and 4:4:4 profiles (PSNR RGB/Y/Cb/Cr, SSIM-Y, CIEDE2000 mean and p95) — and all 24 rate-matched pairs of the public showcase on LPIPS, DISTS and PSNR alike, at roughly 5x JPEG's compute. This research build decodes v20 through v32.
+The historical **Kodak 24** benchmark, measured on AUREA v12, achieved **-5.9% BD-Rate vs JPEG** (22/24 images won), while retaining full **4:4:4 chroma** resolution. The current experimental bitstream is **AUR2 v33**: on top of v27's entropy stack — causal `Lφ/C1/C2` vector codon, luma-weighted spectral exchange, joint color-codon RDO, spectral amplitude/phase envelope, five-way logistic context mixing, activity-keyed AC contexts, echo-primed detail layers, cross-layer channel memory — it adds the diffuse-dark chroma reliefs (v28), the perceptual texture law (v29), and the zero-bit EOB-driven quantization-step fields for luma (v30) and chroma (v31), gated by the relief field (v32), and hardens the decoder's gas-deblocking against grid-aligned periodic content (v33 — a 2px checkerboard now round-trips lossless at q20). On its native 12-image corpus this build wins **every cell of the BD-rate protocol** against optimized libjpeg-turbo — 168/168 across the 4:2:0 and 4:4:4 profiles (PSNR RGB/Y/Cb/Cr, SSIM-Y, CIEDE2000 mean and p95) — and all 24 rate-matched pairs of the public showcase on LPIPS, DISTS and PSNR alike, at roughly 5x JPEG's compute. This research build decodes v20 through v33.
 
 Written entirely in Rust. Ships as a CLI encoder/decoder, a native GUI viewer, a WIC decoder that plugs the format into Windows itself — Photo Viewer with folder navigation, Explorer thumbnails, Paint, WPF — and an MSI installer with a right-click "Convert to AUR" menu on every image.
 
@@ -217,7 +217,7 @@ Five consecutive cycles produced it. The first four touched only the entropy cod
 
 The two dashed rows are recalibrations, not new mechanisms. Both were found by asking where the entropy work had left the older constants stranded — a dead zone tuned for a coder that had since become ~2.6 % leaner, and a DC quantizer that had inherited a threshold meant for AC. Neither changes the bitstream semantics, so existing decoders read the new files.
 
-### AUR2 v28–v32 — the all-green tableau
+### AUR2 v28–v33 — the all-green tableau
 
 Four more format versions closed every remaining red cell. **v28** adds
 diffuse-dark chroma reliefs — a zero-bit repair field derived from the
@@ -235,6 +235,16 @@ and 24/24 showcase pairs on all three metrics**. A bit-exact speed
 campaign then halved the pipeline — 2.0 s encode / 1.9 s decode per
 corpus image on 4 cores, ~5x/5.8x optimized libjpeg-turbo — without
 moving a single pixel of the all-green tableau.
+
+A synthetic torture battery (zone plates, Nyquist checkerboards, binary
+noise, Siemens stars — `scripts/torture_mires.py`) then audited the
+multiplicative modulator stack and found it sound, while flushing out
+two real defects the natural corpus could never show: a 7e-9 f32/f64
+mismatch on a header parameter that broke round-trips on degenerate
+content, and a deblocking trigger blind to grid-aligned periodic
+patterns. Both are fixed in **v33** (same bitstream as v32; the
+deblock semantics ride the version gate), revalidated against the full
+168-cell tableau.
 
 ### Kodak 24 (768x512) — BD-Rate vs JPEG
 
@@ -331,8 +341,8 @@ Quality ranges from 1 to 100. Default is 75.
 Aurea/
   src/
     core/             # Core codec library (aurea-core)
-      aurea_encoder.rs  # AUR2 v32 encoder pipeline
-      lib.rs            # v32..v20 decoder routing
+      aurea_encoder.rs  # AUR2 v33 encoder pipeline
+      lib.rs            # v33..v20 decoder routing
       lot.rs            # Lapped Orthogonal Transform (8/16/32, cosine LUT, rayon)
       rans.rs           # rANS entropy coder (v12 Bayesian Exp-Golomb)
       spectral_envelope.rs # Causal amplitude/phase neighbourhood in the LOT spectrum

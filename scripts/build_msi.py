@@ -39,7 +39,7 @@ from msilib import (
 ROOT = Path(__file__).resolve().parent.parent
 STAGING = ROOT / "target" / "msi_staging"
 OUTDIR = ROOT / "target" / "msi"
-VERSION = "32.0.2"
+VERSION = "33.0.0"
 PRODUCT_NAME = "AUREA Codec"
 MANUFACTURER = "Symphoenix"
 # Stable across releases — this is what lets a future 33.x upgrade replace us.
@@ -122,7 +122,7 @@ def make_banner(path: Path) -> None:
     except OSError:
         font = small = ImageFont.load_default()
     draw.text((64, 14), "AUREA", font=font, fill=GOLD)
-    draw.text((66, 41), "codec image  -  format AUR2 v32", font=small, fill=(180, 170, 150))
+    draw.text((66, 41), "codec image  -  format AUR2 v33", font=small, fill=(180, 170, 150))
     draw.line([(0, h - 2), (w, h - 2)], fill=GOLD, width=2)
     img.save(path, "BMP")
 
@@ -211,7 +211,7 @@ def build_staging() -> None:
         encoding="ascii",
     )
 
-    readme = f"""AUREA Codec {VERSION} (format AUR2 v32)
+    readme = f"""AUREA Codec {VERSION} (format AUR2 v33)
 =====================================
 
 AUREA est un codec d'image experimental qui, sur son corpus de reference
@@ -362,7 +362,7 @@ def add_ui(db) -> None:
         tw,
         192,
         0x30003,
-        "Ce programme installe le codec d'image AUREA (format AUR2 v32) :\n\n"
+        "Ce programme installe le codec d'image AUREA (format AUR2 v33) :\n\n"
         "  - ouverture des .aur dans la Visionneuse de photos Windows\n"
         "  - miniatures .aur dans l'Explorateur (decodeur WIC)\n"
         "  - clic droit sur une image : \"Convertir en AUR\"\n"
@@ -662,7 +662,7 @@ def build_msi() -> Path:
             ("ALLUSERS", "1"),
             ("UpgradeCode", UPGRADE_CODE),
             ("ARPPRODUCTICON", "aurea.ico"),
-            ("ARPCOMMENTS", "Codec d'image AUREA (format AUR2 v32)"),
+            ("ARPCOMMENTS", "Codec d'image AUREA (format AUR2 v33)"),
             ("ARPCONTACT", MANUFACTURER),
         ],
     )

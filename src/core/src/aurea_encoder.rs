@@ -2406,9 +2406,15 @@ pub fn encode_aur2_v13(
         c2_gw = r2.3;
     }
 
-    let detail_step = auto_detail_step(&l_ch, height, width, params.quality)
+    // The header carries detail_step as f32 and the decoder derives every
+    // step (dc_step included) from the rounded value. Roundtrip here so both
+    // sides quantize and rebuild the zero-bit fields from bit-identical
+    // numbers — the f64 original drifts ~1e-8 relative, enough to flip
+    // near-tied spiral-arc ordering on degenerate content (see
+    // `normalize_dc` for the same doctrine on the DC range).
+    let detail_step = (auto_detail_step(&l_ch, height, width, params.quality)
         * step_factor
-        * *calibration::TUNABLE_STEP_SCALE;
+        * *calibration::TUNABLE_STEP_SCALE) as f32 as f64;
     let dc_step = (detail_step * 0.1).max(0.2);
 
     let lot_global_factor = if flags & FLAG_QUALITY_ADAPTIVE != 0 {
@@ -2559,8 +2565,10 @@ pub fn encode_aur2_v13(
     // reliefs; cycle 32 — v30 adds the EOB-driven luma step field. The
     // rupture doctrine applies: a v30 stream is never handed to an earlier
     // reader, and no older emission path is maintained beyond the witnesses.
+    // v33: identical bitstream to v32 — the bump carries the decoder's
+    // strict gas-deblock semantics (periodic-content immunity, cycle 39).
     let version = if use_diffuse_relief {
-        32
+        33
     } else if use_channel_memory {
         27
     } else if use_echo_context {
@@ -2721,6 +2729,15 @@ pub fn encode_aur2_v13(
             dc_data[2].dc_reconstructed.clone(),
         ]
     };
+    if let Some(dir) = std::env::var_os("AUREA_DEBUG_EOB_DUMP") {
+        use std::io::Write;
+        let path = std::path::Path::new(&dir).join("enc_dcgrid.txt");
+        if let Ok(mut f) = std::fs::File::create(path) {
+            for &v in &turing_dc_grid {
+                let _ = writeln!(f, "{:016x}", v.to_bits());
+            }
+        }
+    }
     let turing_field = hierarchy::compute_level1(
         &turing_dc_grid,
         turing_grid_h,
@@ -2770,6 +2787,15 @@ pub fn encode_aur2_v13(
         } else {
             (0..l_gh * l_gw).collect()
         };
+        if let Some(dir) = std::env::var_os("AUREA_DEBUG_EOB_DUMP") {
+            use std::io::Write;
+            let path = std::path::Path::new(&dir).join("enc_spiral.txt");
+            if let Ok(mut f) = std::fs::File::create(path) {
+                for &b in &spiral_order {
+                    let _ = writeln!(f, "{b}");
+                }
+            }
+        }
         Some(crate::scan::progressive_spiral_packets(&spiral_order))
     } else {
         None
@@ -3745,6 +3771,8 @@ pub fn encode_aur2_v13(
             .map(|v| v >= 0.5)
             .unwrap_or(calibration::V33_EOB_ONE_PASS);
         let greedy_probe = one_pass_eob && eob_step_eta > 0.0 && use_progressive_packets;
+        let mod_stats_enabled = std::env::var("AUREA_MOD_STATS").as_deref() == Ok("1");
+        let mut stats_eob_mods: Option<Vec<f64>> = None;
         let pass1: Vec<BlockQuantResult> = block_scan_order
             .par_iter()
             .map_init(trellis::TrellisScratch::default, |scratch, &block_idx| {
@@ -3760,6 +3788,9 @@ pub fn encode_aur2_v13(
                 let capacities: Vec<f64> =
                     (0..n_blocks).map(|i| block_capacity(i) as f64).collect();
                 let mods = hierarchy::eob_step_mods(&eobs, &capacities, eob_step_eta);
+                if mod_stats_enabled {
+                    stats_eob_mods = Some(mods.clone());
+                }
                 block_scan_order
                     .par_iter()
                     .map_init(trellis::TrellisScratch::default, |scratch, &block_idx| {
@@ -3775,6 +3806,70 @@ pub fn encode_aur2_v13(
             } else {
                 pass1
             };
+
+        // Modulator-stacking observability (AUREA_MOD_STATS=1): the effective
+        // per-block step product foveal × turing × per-channel extra × EOB
+        // field, exactly as `quant_block` multiplies it. Read-only, printed
+        // once per channel; the log-neutral regularizers bound each factor,
+        // not their product — this line is where the product is watched.
+        if mod_stats_enabled {
+            let mut products = Vec::with_capacity(n_blocks);
+            let mut comp_min = [f64::INFINITY; 4];
+            let mut comp_max = [f64::NEG_INFINITY; 4];
+            let mut floor_hits = 0usize;
+            for block_idx in 0..n_blocks {
+                let l_fov_idx = (block_idx as f64 * l_foveal_map.len() as f64
+                    / n_blocks.max(1) as f64) as usize;
+                let foveal =
+                    l_foveal_map[l_fov_idx.min(l_foveal_map.len().saturating_sub(1))];
+                let turing = turing_mods.get(block_idx).copied().unwrap_or(1.0);
+                let extra = chroma_step_mods
+                    .and_then(|mods| mods.get(block_idx))
+                    .copied()
+                    .unwrap_or(1.0);
+                let eobm = stats_eob_mods
+                    .as_ref()
+                    .and_then(|mods| mods.get(block_idx))
+                    .copied()
+                    .unwrap_or(1.0);
+                for (slot, value) in [foveal, turing, extra, eobm].into_iter().enumerate() {
+                    comp_min[slot] = comp_min[slot].min(value);
+                    comp_max[slot] = comp_max[slot].max(value);
+                }
+                let product = foveal * turing * extra * eobm;
+                if ac_step * product < 0.1 {
+                    floor_hits += 1;
+                }
+                products.push(product);
+            }
+            products.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let pick = |q: f64| products[((products.len() - 1) as f64 * q) as usize];
+            let gmean = (products.iter().map(|p| p.ln()).sum::<f64>()
+                / products.len().max(1) as f64)
+                .exp();
+            let phi = crate::golden::PHI;
+            let band = |lo: f64, hi: f64| {
+                products.iter().filter(|&&p| p < lo || p > hi).count()
+            };
+            eprintln!(
+                "[AUREA_MOD_STATS] ch={ch_idx} n={} ac_step={ac_step:.4} \
+                 prod_min={:.4} p01={:.4} gmean={:.4} p99={:.4} prod_max={:.4} \
+                 out_phi={} out_phi2={} floor_hits={floor_hits} \
+                 fov=[{:.3},{:.3}] turing=[{:.3},{:.3}] extra=[{:.3},{:.3}] eob=[{:.3},{:.3}]",
+                products.len(),
+                pick(0.0),
+                pick(0.01),
+                gmean,
+                pick(0.99),
+                pick(1.0),
+                band(1.0 / phi, phi),
+                band(1.0 / (phi * phi), phi * phi),
+                comp_min[0], comp_max[0],
+                comp_min[1], comp_max[1],
+                comp_min[2], comp_max[2],
+                comp_min[3], comp_max[3],
+            );
+        }
 
         // Sequential assembly in the original scan order (identical writes).
         for result in &block_results {
@@ -3922,6 +4017,32 @@ pub fn encode_aur2_v13(
         drop(t_quant);
         let _t_rans = crate::timing::stage("enc:rans_ac");
         // Encode EOB positions: DPCM + rANS compression.
+        if let Some(dir) = std::env::var_os("AUREA_DEBUG_EOB_DUMP") {
+            use std::io::Write;
+            let path = std::path::Path::new(&dir).join(format!("enc_ch{ch_idx}.txt"));
+            if let Ok(mut f) = std::fs::File::create(path) {
+                for (i, &e) in eob_positions.iter().enumerate() {
+                    let b = ch_block_buckets.get(i).copied().unwrap_or(255);
+                    let _ = writeln!(f, "{i} {e} {b}");
+                }
+            }
+            if use_progressive_packets {
+                let mut bad = 0usize;
+                for (i, block) in ac_by_block.iter().enumerate() {
+                    if block.len() != eob_positions[i] as usize {
+                        if bad < 8 {
+                            eprintln!(
+                                "[EOB_INVARIANT] ch={ch_idx} block={i} ac_len={} eob={}",
+                                block.len(),
+                                eob_positions[i]
+                            );
+                        }
+                        bad += 1;
+                    }
+                }
+                eprintln!("[EOB_INVARIANT] ch={ch_idx} violations={bad}/{}", ac_by_block.len());
+            }
+        }
         let eob_encoded = {
             let mut eob_deltas: Vec<i16> = Vec::with_capacity(n_blocks);
             let mut prev_eob: i16 = 0;
@@ -4338,6 +4459,21 @@ pub fn encode_aur2_v13(
                 (symbol_count, encoded)
                 })
                 .collect();
+            if std::env::var_os("AUREA_DEBUG_EOB_DUMP").is_some() {
+                for (arc_idx, (packet, (count, _))) in
+                    packets.iter().zip(detail_packets.iter()).enumerate()
+                {
+                    let from_eobs: usize = packet
+                        .iter()
+                        .map(|&idx| (eob_positions[idx] as usize).saturating_sub(skeleton_coeffs))
+                        .sum();
+                    eprintln!(
+                        "[LAYER_COUNT] ch={ch_idx} arc={arc_idx} blocks={} written={count} from_eobs={from_eobs}{}",
+                        packet.len(),
+                        if *count != from_eobs { "  <== MISMATCH" } else { "" },
+                    );
+                }
+            }
             encoded_packets.extend(detail_packets);
             Some(ProgressiveChannelAc {
                 eob_count: n_blocks,

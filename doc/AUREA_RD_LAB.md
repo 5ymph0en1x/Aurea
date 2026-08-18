@@ -3057,3 +3057,121 @@ Après ajout : le cycle traverse agree.aur → agree.png → alchemist.aur →
 kryte.aur → kryte.png. L'ensemble (plus KindMap et l'intégration Photo
 Gallery documentée) est reversé dans le MSI 32.0.2, réinstallé, clés de
 test HKCU purgées — l'état de la machine vient intégralement du paquet.
+
+## Cycle 39 — les mires de torture, et le bug qu'elles ont déterré
+
+Suggestion externe (collègue) : surveiller l'empilement multiplicatif des
+modulateurs sur mires synthétiques extrêmes. Verdict de la charte : le
+meilleur des trois axes proposés — harnais pas cher, valeur réelle.
+
+### Le harnais
+
+Sonde `AUREA_MOD_STATS=1` dans l'encodeur : le produit par bloc
+foveal × turing × (bright|breathing) × champ EOB — la multiplication
+exacte de `quant_block` — avec percentiles, bandes [φ⁻¹,φ]/[φ⁻²,φ²] et
+comptage des clamps plancher (`ac_step × produit < 0,1`). Lecture seule,
+bit-exactitude prouvée par hash triple (avant/après/sonde active).
+`scripts/torture_mires.py` : 12 mires 768² (zone plates luma et chroma,
+rampes claire et sombre, damiers Nyquist, bruit binaire, étoile de
+Siemens, chirp, aplat, disques sur fond noir) × q20/40/75, enveloppe de
+référence sur les 12 originals, rapport `target/mires/REPORT.md`.
+
+### La prise : neuf cas sur 36 indécodables
+
+Avant toute statistique d'empilement, le harnais a mis au jour un bug de
+correction pure : l'encodeur produisait des flux invalides sur 9 des 36
+cas (siemens_star aux trois qualités, zone plates, rampes, chirp) —
+« layer N symbol count does not match EOBs », « invalid rANS state ».
+
+La bissection a éliminé l'une-passe EOB, le champ EOB, le codec de bande
+(symétrique), les buckets (identiques), les EOB transmis (identiques),
+la section match (inerte) — avant que les hashes des grilles DC ne
+parlent : **écart relatif constant de −6,94·10⁻⁹ entre la grille DC
+reconstruite de l'encodeur et celle du décodeur**. `detail_step` voyage
+en f32 dans l'en-tête (`bitstream.rs` le commente depuis longtemps) ;
+le décodeur en dérive son `dc_step`, l'encodeur gardait son f64 pleine
+précision. Tous les champs zéro-bit — dont l'ordre spiral qui partitionne
+les paquets progressifs — sont recalculés des deux côtés depuis cette
+grille : sur les mires dégénérées pleines d'ex-æquo, 10⁻⁸ suffit à
+rebattre 2203 positions sur 2304 et à désynchroniser les arcs.
+
+Correctif d'une ligne, doctrine `normalize_dc` (qui avait déjà corrigé
+la même classe de bug pour dc_min/dc_max un cycle plus tôt) : l'encodeur
+fait transiter `detail_step` par f32 avant toute dérivation. Round-trip
+36/36, 167 tests verts, tailles corpus inchangées à l'octet près sur les
+sentinelles (le contenu diffère — correctif sémantique, pas cosmétique).
+Deux faux « diff 0 » ont retardé la chasse : `cmp` qui retourne 127 sous
+Git Bash, et un `diff` sur fichier absent avalé par `wc -l` — leçon :
+les hashes Python, rien d'autre.
+
+### L'empilement lui-même : borné, jamais destructif
+
+Aucun clamp plancher nulle part. Moyenne géométrique ~1,0 partout — la
+log-neutralité tient en pratique. Le produit sort de [φ⁻², φ²] sur 169
+blocs de mires (et déjà 14 blocs du corpus, fine_ally q20 en tête) ;
+enveloppe mires [0,23 ; 2,92] contre corpus [0,35 ; 2,28]. Pas de
+pathologie destructive — la question du collègue est close par la
+mesure, avec un bug de round-trip en prime que le corpus naturel
+n'aurait jamais montré.
+
+### Restes pour un cycle futur
+
+- **checker_2px : PSNR inversé** (24,3 → 16,2 → 15,2 dB de q20 à q75,
+  modulateurs tous neutres, fichiers qui grossissent) — le codec dépense
+  plus d'octets pour un résultat pire sur le damier 2 px. Piste :
+  post-chaîne ou QMAT rotatif sur Nyquist pur.
+- noise_binary : même inversion (34,9 → 24,1 dB) — possible rançon
+  assumée des lois perceptuelles sur bruit pur, à trancher.
+- Faut-il clore le produit à φ² dur ? 14 blocs du corpus le dépassent
+  déjà sans dégât visible — mesurer avant de serrer.
+
+## Cycle 40 — le deblocking démasqué : v33
+
+Les deux restes du cycle 39 — checker_2px et noise_binary aux PSNR
+*inversés* (pire à q75 qu'à q20, fichiers qui grossissent, modulateurs
+tous neutres) — avaient un coupable unique et inattendu : le
+**deblocking « gaz » du décodeur** (`deblock_gas_only`).
+
+### Le mécanisme
+
+Son test de lissité intérieure ne regardait qu'une marche de chaque côté
+de la frontière de bloc. Sur un damier 2 px aligné sur la grille (16
+divisible par 2), ces deux marches tombent dans les cellules — zéro —
+et le filtre prenait chaque vraie transition noir/blanc de 255 pour un
+artefact à écraser vers le gris : quadrillage aux frontières, dérive de
+moyenne (le blend opère en espace PTF concave), et inversion de qualité
+puisque plus le damier décodé est net, plus il y a à détruire. Causalité
+prouvée au couteau : `AUREA_DEBLOCK=0` transformait q20 en **sans perte**
+(24,3 → 99 dB) et q75 de 15,2 à 53,0 dB.
+
+### Le correctif — deux portes, sémantique v33
+
+1. **Fenêtre élargie** : la lissité intérieure se juge sur 4 marches par
+   côté, plus une seule — un ciel réel est lisse sur 5 échantillons, un
+   motif périodique ≤ 4 px révèle ses cellules.
+2. **Plafond principiel** `MAX_ARTIFACT_STEP = 24` : un artefact de bloc
+   est borné par ce que la quantification peut produire ; une marche de
+   255 entre deux flancs plats est du contenu, jamais un artefact. Cette
+   porte ferme aussi le résidu du bruit binaire, où des plages localement
+   plates passaient la première porte par pure probabilité.
+
+La post-chaîne étant du façonnage décodeur pur, le changement de défaut
+voyage dans un bump : **AUR2 v33, bitstream identique à v32**, seul le
+déclencheur du filtre change, gaté sur `header.version >= 33`. Vérifié :
+les flux v32 décodent bit-identiques à l'ancien binaire (8/8).
+
+### Revalidation complète
+
+Mires : checker_2px 99,0 / 44,7 / 53,0 dB (q20/40/75 — q20 sans perte),
+noise_binary 63,0 / 53,6 dB ; le harnais ne lève plus aucun rouge
+qualité. Corpus : à bitstream constant, q75 gagne partout (+0,03 à
++0,17 dB — le filtre mangeait du vrai détail à haute qualité), q20 cède
+au plus 0,05 dB. **Les 168 cellules BD recalculées contre les ancres
+JPEG stockées restent toutes vertes** (dispair Cb-420 et phoenix Cr-420
+demeurent les deux victoires par forfait du rapport v32 — supports
+disjoints, BD indéfini). 167/167 tests après mise à jour des deux
+épingles de version.
+
+Moralité, la même qu'au cycle 29 : les portes doivent être locales *et*
+bornées par la physique du codec. Un filtre qui ne sait pas ce que la
+quantification peut produire finit par corriger le contenu lui-même.

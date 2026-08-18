@@ -1023,13 +1023,22 @@ pub fn anti_ring_sigma(plane: &mut [f64], h: usize, w: usize, step: f64) {
 ///
 /// Unlike deblock_lot_grid (which uses cosine window over 8px, -0.59 dB),
 /// this touches only the immediate boundary pixels (≤ -0.1 dB target).
-pub fn deblock_gas_only(plane: &mut [f64], h: usize, w: usize, block_size: usize) {
+/// `strict` is the v33 semantics: the interior-smoothness window widens
+/// from one step to four per side and the boundary step is capped by
+/// `MAX_ARTIFACT_STEP` — grid-aligned periodic content (checkerboards,
+/// binary noise) stops being mistaken for blocking artifacts. Streams
+/// v32 and earlier keep the historical trigger, bit for bit.
+pub fn deblock_gas_only(plane: &mut [f64], h: usize, w: usize, block_size: usize, strict: bool) {
     if h < block_size * 2 || w < block_size * 2 {
         return;
     }
 
     // Gas threshold: pixels with gradient below this are "gas" (smooth)
     const GAS_THRESH: f64 = 2.5;
+    // A blocking artifact is bounded by what quantization can produce; a
+    // large boundary step over flat sides is real content (checkerboards,
+    // binary noise), never an artifact. Cycle 39 mires verdict.
+    const MAX_ARTIFACT_STEP: f64 = 24.0;
     // Blend strength: phi_inv² ≈ 0.382 (golden attenuation)
     const BLEND: f64 = 0.382;
 
@@ -1048,22 +1057,41 @@ pub fn deblock_gas_only(plane: &mut [f64], h: usize, w: usize, block_size: usize
             let p_right = src[y * w + bx];
             let boundary_step = (p_right - p_left).abs();
 
-            // Check interior smoothness (2 pixels on each side)
-            let grad_left = if bx >= 2 {
-                (src[y * w + bx - 1] - src[y * w + bx - 2]).abs()
-            } else {
-                boundary_step
-            };
-            let grad_right = if bx + 2 < w {
-                (src[y * w + bx + 1] - src[y * w + bx]).abs()
-            } else {
-                boundary_step
-            };
+            // Interior smoothness over up to 4 steps per side: a single
+            // adjacent step is blind to periodic content whose cells align
+            // with the block grid (a 2px checkerboard reads as "smooth" and
+            // gets its true edges blended away — cycle 39 mires verdict).
+            let span = if strict { 4 } else { 1 };
+            let mut grad_left = 0.0f64;
+            let mut steps = 0;
+            for d in 2..=(span + 1) {
+                if bx >= d {
+                    grad_left = grad_left
+                        .max((src[y * w + bx - (d - 1)] - src[y * w + bx - d]).abs());
+                    steps += 1;
+                }
+            }
+            if steps == 0 {
+                grad_left = boundary_step;
+            }
+            let mut grad_right = 0.0f64;
+            let mut steps = 0;
+            for d in 0..span {
+                if bx + d + 1 < w {
+                    grad_right = grad_right
+                        .max((src[y * w + bx + d + 1] - src[y * w + bx + d]).abs());
+                    steps += 1;
+                }
+            }
+            if steps == 0 {
+                grad_right = boundary_step;
+            }
 
             // Gas: both sides smooth AND boundary step is an artifact
             let is_gas = grad_left < GAS_THRESH
                 && grad_right < GAS_THRESH
-                && boundary_step > grad_left.max(grad_right);
+                && boundary_step > grad_left.max(grad_right)
+                && (!strict || boundary_step < MAX_ARTIFACT_STEP);
 
             if is_gas {
                 // Weber-adaptive blend: stronger in dark areas where blocking is more visible.
@@ -1103,20 +1131,37 @@ pub fn deblock_gas_only(plane: &mut [f64], h: usize, w: usize, block_size: usize
                 let p_bottom = src2[by * w + x];
                 let boundary_step = (p_bottom - p_top).abs();
 
-                let grad_top = if by >= 2 {
-                    (src2[(by - 1) * w + x] - src2[(by - 2) * w + x]).abs()
-                } else {
-                    boundary_step
-                };
-                let grad_bot = if by + 2 < h {
-                    (src2[(by + 1) * w + x] - src2[by * w + x]).abs()
-                } else {
-                    boundary_step
-                };
+                // Same 4-step interior window as the vertical pass.
+                let span = if strict { 4 } else { 1 };
+                let mut grad_top = 0.0f64;
+                let mut steps = 0;
+                for d in 2..=(span + 1) {
+                    if by >= d {
+                        grad_top = grad_top
+                            .max((src2[(by - (d - 1)) * w + x] - src2[(by - d) * w + x]).abs());
+                        steps += 1;
+                    }
+                }
+                if steps == 0 {
+                    grad_top = boundary_step;
+                }
+                let mut grad_bot = 0.0f64;
+                let mut steps = 0;
+                for d in 0..span {
+                    if by + d + 1 < h {
+                        grad_bot = grad_bot
+                            .max((src2[(by + d + 1) * w + x] - src2[(by + d) * w + x]).abs());
+                        steps += 1;
+                    }
+                }
+                if steps == 0 {
+                    grad_bot = boundary_step;
+                }
 
                 let is_gas = grad_top < GAS_THRESH
                     && grad_bot < GAS_THRESH
-                    && boundary_step > grad_top.max(grad_bot);
+                    && boundary_step > grad_top.max(grad_bot)
+                    && (!strict || boundary_step < MAX_ARTIFACT_STEP);
 
                 if is_gas {
                     let lum = (p_top.abs() + p_bottom.abs()) * 0.5;
