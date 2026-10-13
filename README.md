@@ -1,8 +1,5 @@
 # AUREA
 
-La charte, les expériences zéro-bit et leurs verdicts reproductibles sont
-tenus dans [le journal du laboratoire R&D](doc/AUREA_RD_LAB.md).
-
 **A lossy image codec built on the Golden Ratio, Turing morphogenesis, and rANS entropy coding.**
 
 <p align="center">
